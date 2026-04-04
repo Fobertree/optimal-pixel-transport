@@ -1,0 +1,16 @@
+.idea/
+build/
+
+cmake-build-debug/
+cmake-build-emscriptendebug/
+cmake-build-release/
+
+*.txt
+tmp.*
+*.html
+
+Shaders/basic_quad.wgsl
+
+Images/
+eigen-5.0.0
+dawn

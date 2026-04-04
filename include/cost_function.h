@@ -1,0 +1,97 @@
+//
+// Created by Alexander Liu on 3/20/26.
+//
+
+#ifndef OPTIMALPIXELTRANSPORT_COST_FUNCTION_H
+#define OPTIMALPIXELTRANSPORT_COST_FUNCTION_H
+
+#include <Eigen/Dense>
+
+#include "particle.h"
+
+// templated compile-time functor factory design built on traits
+
+static int DEBUG_ID = 0;
+
+enum class COST_TYPE {
+    ZERO,
+    RGB,
+    RGB_DIST_HYBRID
+};
+// sinkhorn -> have struct save ineternal data - or convert to class
+
+// functors
+struct Zero_Cost {
+    // control
+    float operator()(const Particle &p1, const Particle &p2) {
+        return 0;
+    };
+};
+
+struct RGB_Cost {
+    float operator()(const Particle &p1, const Particle &p2) {
+        auto c1 = p1.getColor();
+        auto c2 = p2.getColor();
+
+        float dr = c1[0] - c2[0];
+        float dg = c1[1] - c2[1];
+        float db = c1[2] - c2[2];
+
+        return dr * dr + dg * dg + db * db;
+    }
+};
+
+struct Dist_Cost {
+    float operator()(const Particle &p1, const Particle &p2) {
+        auto p1_pos = p1.getPos();
+        auto p2_pos = p2.getPos();
+
+        float dx = p1_pos[0] - p2_pos[0];
+        float dy = p1_pos[1] - p2_pos[1];
+
+        return dx * dx + dy * dy;
+    }
+};
+
+struct RGB_Dist_Hybrid_Cost {
+    float operator()(const Particle &p1, const Particle &p2) const {
+        float rgb_cost = RGB_Cost()(p1, p2) * 255;
+        float dist_cost = Dist_Cost()(p1, p2); // tiebreaker
+
+        if (DEBUG_ID < 10) {
+            std::cout << std::format("RGB: {}, DIST: {}\n", rgb_cost, dist_cost);
+            DEBUG_ID++;
+        }
+
+        return (rgb_weight * rgb_cost + (1 - rgb_weight) * dist_cost);
+    }
+
+    float rgb_weight = 0.99;
+};
+
+// traits
+template<COST_TYPE T>
+struct CostFunctionTraits;
+
+template<>
+struct CostFunctionTraits<COST_TYPE::ZERO> {
+    using type = Zero_Cost;
+};
+
+template<>
+struct CostFunctionTraits<COST_TYPE::RGB> {
+    using type = RGB_Cost;
+};
+
+template<>
+struct CostFunctionTraits<COST_TYPE::RGB_DIST_HYBRID> {
+    using type = RGB_Dist_Hybrid_Cost;
+};
+
+// factory function
+template<COST_TYPE T>
+auto get_cost_function() {
+    return typename CostFunctionTraits<T>::type{};
+}
+
+#endif //OPTIMALPIXELTRANSPORT_COST_FUNCTION_H
