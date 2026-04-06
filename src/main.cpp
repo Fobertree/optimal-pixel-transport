@@ -125,7 +125,9 @@ void Start() {
 void InitParticles() {
 //    constexpr static COST_TYPE costType = COST_TYPE::RGB_DIST_HYBRID;
     using DefaultSinkhorn = Sinkhorn<COST_TYPE::RGB_DIST_HYBRID>;
-    solver = new Hungarian<float>("img_1.png", "img_7.png", 100, 100);
+    using DefaultLAPJV = LAPJV<int64_t>;
+    using DefaultHungarian = Hungarian<float>;
+    solver = new DefaultLAPJV("img_1.png", "img_6.png", 100, 100);
     particleCPUData = solver->getParticleCPUBuffer();
 }
 

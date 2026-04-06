@@ -16,7 +16,8 @@ static int DEBUG_ID = 0;
 enum class COST_TYPE {
     ZERO,
     RGB,
-    RGB_DIST_HYBRID
+    RGB_DIST_HYBRID,
+    RGB_DIST_INT_HYBRID
 };
 // sinkhorn -> have struct save ineternal data - or convert to class
 
@@ -69,6 +70,26 @@ struct RGB_Dist_Hybrid_Cost {
     float rgb_weight = 0.99;
 };
 
+struct RGB_Dist_Hybrid_Dist_Cost {
+    float operator()(const Particle &p1, const Particle &p2) const {
+        int rgb_cost = RGB_Cost()(p1, p2) * 255;
+        int dist_cost = Dist_Cost()(p1, p2); // tiebreaker
+
+        float cost = rgb_weight * rgb_cost + (1 - rgb_weight) * dist_cost;
+        int scaled_cost = cost * int_factor;
+
+        if (DEBUG_ID < 10) {
+            std::cout << std::format("Orig: {}, Cost: {}\n", cost, scaled_cost);
+            DEBUG_ID++;
+        }
+
+        return scaled_cost;
+    }
+
+    int int_factor = 1e3;
+    float rgb_weight = 0.99;
+};
+
 // traits
 template<COST_TYPE T>
 struct CostFunctionTraits;
@@ -86,6 +107,11 @@ struct CostFunctionTraits<COST_TYPE::RGB> {
 template<>
 struct CostFunctionTraits<COST_TYPE::RGB_DIST_HYBRID> {
     using type = RGB_Dist_Hybrid_Cost;
+};
+
+template<>
+struct CostFunctionTraits<COST_TYPE::RGB_DIST_INT_HYBRID> {
+    using type = RGB_Dist_Hybrid_Dist_Cost;
 };
 
 // factory function

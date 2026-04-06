@@ -15,6 +15,7 @@
 #include <numeric>
 #include <algorithm>
 #include <random>
+#include <type_traits>
 
 // consider templated factory refactor if we want more than one potential solver
 
@@ -75,6 +76,7 @@ class Hungarian : public SolverBase {
 public:
     explicit Hungarian(const std::string &start_path, const std::string &target_path, int pWidth, int pHeight)
             : SolverBase(start_path, target_path, pWidth, pHeight) {
+        puts("HUNGARIAN");
 
         // TODO: cost matrix only in terms of srcLen and tarLen
         len_ = src_buf_.length();
@@ -117,12 +119,14 @@ public:
         std::fill(prev_.begin(), prev_.end(), -1);
         std::fill(inZ_.begin(), inZ_.end(), false);
 
+        // likely bulk of work
         while (job_[tarCur] != -1) {
             inZ_[tarCur] = true;
             const int src = job_[tarCur];
             T delta = INF;
             int tarNext;
             for (int tar = 0; tar < tarLen_; tar++) {
+                // thread pool each iteration as promises - iterations are independent
                 if (!inZ_[tar]) {
                     if (ckmin(minTo_[tar], cost_matrix_[src][tar] - ys_[src] - yt_[tar]))
                         prev_[tar] = tarCur;
@@ -131,6 +135,7 @@ public:
                 }
             }
 
+            // thread pool each iteration as promises - iterations independent
             for (int tar = 0; tar <= tarLen_; tar++) {
                 if (inZ_[tar]) {
                     ys_[job_[tar]] += delta;
@@ -217,6 +222,8 @@ private:
     const T INF = std::numeric_limits<T>::max();
 };
 
+// Async hungarian: https://web.mit.edu/dimitrib/www/Bertsekas_Castanon_Parallel_Hungarian_1993.pdf
+
 // https://lucyliu-ucsb.github.io/posts/Sinkhorn-algorithm/
 template<COST_TYPE T = COST_TYPE::RGB_DIST_HYBRID>
 class Sinkhorn : public SolverBase {
@@ -253,7 +260,6 @@ public:
 
     void iterateSolver() override {
         // covers one (or N iterations) or Sinkhorn
-        puts("1");
 
         u_ = A_.array() / ((K_ * v_).array() + 1e-12).array();
         v_ = B_.array() / ((K_.transpose() * u_).array() + 1e-12).array();
@@ -350,7 +356,8 @@ private:
 
 class GaleShapley : public SolverBase {
     // proposor: source, acceptor: target
-    // problem: sorting everything would be super inefficient O(N^2log N)
+    // problem: sorting everything would be super inefficient O(N^2log N), but very parallelizable
+    // bigger problem: proposer optimality (order of proposers does not matter), but no acceptor/rejector optimality
     explicit GaleShapley(const std::string &start_path, const std::string &target_path, int pWidth, int pHeight)
             : SolverBase(start_path, target_path, pWidth, pHeight) {
 
@@ -361,18 +368,30 @@ class GaleShapley : public SolverBase {
 
 // Jonker-Volgenant
 // https://gwern.net/doc/statistics/decision/1987-jonker.pdf
-template<typename T, COST_TYPE COST_T>
+// https://github.com/yongyanghz/LAPJV-algorithm-c/blob/master/src/lap.cpp
+template<typename T, COST_TYPE COST_T = COST_TYPE::RGB_DIST_INT_HYBRID>
 class LAPJV : public SolverBase {
 public:
     // Linear Assignment Problem Jonker-Volgenant
+    // Note: LAPJV impl is one-indexed, although particle system is 0-indexed for now
     explicit LAPJV(const std::string &start_path, const std::string &target_path, int pWidth, int pHeight)
             : SolverBase(start_path, target_path, pWidth, pHeight) {
         assert(pWidth == pHeight);
-        n_ = pWidth;
+        static_assert(std::is_integral<T>::value, "LAPJV template parameter must be integral");
+        n_ = src_buf_.length();
         x_ = std::vector<int>(n_ + 1, 0);
         free_ = std::vector<int>(n_ + 1, -1);
-        d_ = std::vector<int>(n_ + 1, 0);
+        d_ = std::vector<T>(n_ + 1, 0);
         pred_ = std::vector<int>(n_ + 1, 0);
+        y_ = std::vector<int>(n_ + 1, 0);
+        v_ = std::vector<T>(n_ + 1, 0);
+        u_ = std::vector<T>(n_ + 1, 0);
+        col_ = std::vector<int>(n_ + 1, 0);
+        last_ = i_ = j_ = -1;
+
+        cost_matrix_ = std::vector<std::vector<T>>(n_ + 1, std::vector<T>(n_ + 1));
+        compute_cost_matrix();
+        std::iota(col_.begin() + 1, col_.end(), 1);
 
         // preprocess
         // COLUMN REDUCTION
@@ -385,20 +404,22 @@ public:
                     h_ = cost_matrix_[i][j];
                     i1_ = i;
                 }
-                v_[j] = h_;
-                if (x_[i1_] == 0) {
-                    x_[i1_] = j;
-                    y_[j] = i1_;
-                } else {
-                    x_[i] = -std::abs(x_[i]);
-                    y_[j] = 0;
-                }
+            }
+            v_[j] = h_;
+            if (x_[i1_] == 0) {
+                x_[i1_] = j;
+                y_[j] = i1_;
+            } else {
+                x_[i_] = -std::abs(x_[i1_]);
+                y_[j] = 0;
             }
         }
 
+        puts("column reduciton ok");
+
         // REDUCTION TRANSFER
         f_ = 0;
-        for (int i = 0; i <= n_; i++) {
+        for (int i = 1; i <= n_; i++) {
             if (x_[i] == 0) {
                 f_++;
                 free_[f_] = i;
@@ -413,9 +434,11 @@ public:
                         min_elem = cost_matrix_[i][j] - v_[j];
                     }
                 }
-                v_[j1] = v_[j1] - min_elem;
+                v_[j1_] -= min_elem;
             }
         }
+
+        puts("reduction transfer");
 
         // AUGMENTING ROW REDUCTION
         for (int cnt = 0; cnt < 2; cnt++) {
@@ -423,14 +446,22 @@ public:
             int k = 1;
             f0_ = f_;
             f_ = 0;
+            std::cout << f0_ << std::endl;
+            int iters = 0;
+            // something wrong here
             while (k <= f0_) {
+                if (iters++ > 1000) {
+                    puts("too many iters row reduction");
+                    std::cout << std::format("k: {}, f0: {}\n", k, f0_);
+                    throw std::runtime_error("TOO MANY ITERS IN ROW REDUCTION");
+                }
                 int i = free_[k];
                 k++;
                 int u1 = cost_matrix_[i][1] - v_[1];
                 j1_ = 1;
                 T u2 = INF;
 
-                for (int j = 2; j < n_; j++) {
+                for (int j = 2; j <= n_; j++) {
                     h_ = cost_matrix_[i][j] - v_[j];
                     if (h_ < u2) {
                         if (h_ >= u1) {
@@ -465,9 +496,10 @@ public:
                 x_[i] = j1_;
                 y_[j1_] = i;
             }
-
             f0_ = f_;
         }
+        f_ = 1; // start for loop from f_ : 1 -> f0
+        puts("CONSTRUCTOR OK");
     }
 
     void iterateSolver() override {
@@ -475,8 +507,11 @@ public:
         // AUGMENTATION
         if (f_ > f0_) {
             // AUGMENTATION OUTER LOOP DONE
+            puts("DONE");
+            exert_impulse();
             return;
         }
+
         i1_ = free_[f_];
         int low = 1, up = 1;
         // can parallelize
@@ -485,32 +520,40 @@ public:
             pred_[j_] = i1_;
         }
 
+        int iters = 0;
+
         while (true) {
+            iters++;
+            if (iters > 1000) {
+                puts("looping too long in iterateSolver");
+                throw std::runtime_error("Looping too long in iterateSolver");
+            }
             if (up == low) {
                 // fine columns with new value for minimum d
                 last_ = low - 1;
                 min_elem_ = d_[col_[up]];
                 up++;
                 for (int k = up; k <= n_; k++) {
-                    int j = col_[k];
-                    h_ = d_[j];
+                    j_ = col_[k];
+                    h_ = d_[j_];
                     if (h_ <= min_elem_) {
                         if (h_ < min_elem_) {
                             up = low;
                             min_elem_ = h_;
                         }
                         col_[k] = col_[up];
-                        col_[up] = j;
+                        col_[up] = j_;
                         up++;
                     }
                 }
             }
             // can maybe parallelize this via promises/futures
             for (int h = low; h < up; h++) {
-                int j = col_[h];
+                j_ = col_[h];
                 // TODO: refactor parts of this into functions, so we can hook on exert_impulse at end
-                if (y_[j] == 0) {
+                if (y_[j_] == 0) {
                     augment();
+                    exert_impulse();
                     return;
                 }
             }
@@ -521,24 +564,25 @@ public:
             i_ = y_[j1_];
             int u1 = cost_matrix_[i_][j1_] - v_[j1_] - min_elem_;
             for (int k = up; k <= n_; k++) {
-                int j = col_[k];
-                h_ = cost_matrix_[i_][j] - v_[j] - u1;
-                if (h_ < d_[j]) {
-                    d_[j] = h_;
-                    pred_[j] = i_;
+                j_ = col_[k];
+                h_ = cost_matrix_[i_][j_] - v_[j_] - u1;
+                if (h_ < d_[j_]) {
+                    d_[j_] = h_;
+                    pred_[j_] = i_;
                     if (h_ == min_elem_) {
-                        if (y_[j] == 0) {
+                        if (y_[j_] == 0) {
                             augment();
+                            std::cout << iters << std::endl;
+                            exert_impulse();
                             return;
                         } else {
                             col_[k] = col_[up];
-                            col_[up] = j;
+                            col_[up] = j_;
                             up++;
                         }
                     }
                 }
             }
-
         }
     }
 
@@ -547,18 +591,39 @@ private:
         // TODO: move to cost_function or util
         // a cost function
 
-        auto cost_function = get_cost_function<COST_TYPE::RGB_DIST_HYBRID>();
+        auto cost_function = get_cost_function<COST_T>();
 
         for (int i = 0; i < n_; i++) {
             auto p1 = src_buf_.getParticle(i);
             for (int j = 0; j < n_; j++) {
                 auto p2 = target_buf_.getParticle(j);
-                cost_matrix_[i][j] = cost_function(*p1, *p2) * COST_RESOLUTION_PARAM;
+                cost_matrix_[i + 1][j + 1] = cost_function(*p1, *p2);
             }
+        }
+        puts("COST MATRIX OK");
+    }
+
+    void exert_impulse() {
+//        puts("EXERTING IMPULSE");
+        // very parallelizable
+        for (int i = 1; i <= n_; i++) {
+            int targetIndex = x_.at(i);
+            if (targetIndex < 1 || targetIndex > n_) continue;
+            // particle buffers are 0-indexed
+            auto p1 = src_buf_.getParticle(i - 1);
+
+            auto pos1 = p1->getPos();
+            auto pos2 = target_buf_.getParticle(targetIndex - 1)->getPos();
+
+            // treating as unit mass
+            std::array<float, 2> velo = {pos2[0] - pos1[0], pos2[1] - pos1[1]};
+
+            p1->addVelo(velo, 1.);
         }
     }
 
     void augment() {
+//        puts("augment");
         for (int k = 1; k <= last_; k++) {
             j1_ = col_[k];
             v_[j1_] = v_[j1_] + d_[j1_] - min_elem_;
@@ -580,17 +645,19 @@ private:
             h_ += u_[i_] + v_[j_];
         }
         // h is final price
+        f_++;
     }
 
     // TODO: cost_matrix impl
-    std::vector<std::vector<int>> cost_matrix_;
+    std::vector<std::vector<T>> cost_matrix_;
     int n_;  // size
-    std::vector<int> x_, y_, free_, d_, pred_;
-    T u_, v_;       // duals for reduction - have >=1 elem = 0 in every row + col
-    const T INF = std::numeric_limits<T>::max();
+    std::vector<int> x_, y_, free_, pred_;
+    std::vector<T> d_;
+    std::vector<T> u_, v_;       // duals for reduction - have >=1 elem = 0 in every row + col
+    const T INF = std::numeric_limits<T>::max() / 8;
 
-    T h_;
-    int f_, i1_, j1_, j2_, f0_, last_, min_elem_, i_, j_;
+    T h_, min_elem_;
+    int f_, i1_, j1_, j2_, f0_, last_{}, i_{}, j_{};
 
     std::vector<int> col_;
     // LAPJV was originally designed for integer cost matrices
