@@ -29,7 +29,7 @@ namespace ParticlePhysics {
             particle->applyBoundary();
         }
     }
-    // TODO: migrate derivative update routines here (ex. RK4)
+    // TODO: migrate numerical integral update routines here (ex. RK4)
 }
 
 #endif //OPTIMALPIXELTRANSPORT_PARTICLE_PHYSICS_H
