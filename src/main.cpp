@@ -127,6 +127,8 @@ void InitParticles() {
     using DefaultSinkhorn = Sinkhorn<COST_TYPE::RGB_DIST_HYBRID>;
     using DefaultLAPJV = LAPJV<int64_t>;
     using DefaultHungarian = Hungarian<float>;
+    // Using integral types should be much better
+    using IntegralHungarian = Hungarian<int64_t, COST_TYPE::RGB_DIST_INT_HYBRID>;
     solver = new DefaultLAPJV("img_1.png", "img_6.png", 100, 100);
     particleCPUData = solver->getParticleCPUBuffer();
 }
