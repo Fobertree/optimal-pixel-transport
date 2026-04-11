@@ -195,6 +195,10 @@ private:
         // NOTE: augmenting paths can change previous nodes/job_[i]
         // This just creates illusion of real-time
         // TODO: optimize via diffing approach
+        static int iter = 0;
+        const static int MOD_ITER = 10;
+        if (iter % MOD_ITER != 0) return;
+
         for (int i = 0; i < tarLen_; i++) {
             int srcIndex = job_[i]; // matched src for target
             if (srcIndex == -1) continue;
@@ -642,16 +646,11 @@ private:
     }
 
     void exert_impulse() {
-//        puts("EXERTING IMPULSE");
-        // very parallelizable
-        std::vector<T> debug_rowsol(rowsol_.begin(), rowsol_.end());
-//        std::sort(debug_rowsol.begin(), debug_rowsol.end());
-//        std::copy(debug_rowsol.begin(), debug_rowsol.end(), std::ostream_iterator<T>(std::cout, " "));
-        std::vector<T> debug_colsol(colsol_.begin(), colsol_.end());
-//        for (auto dbg: debug_colsol) {
-//            std::cout << dbg << " ";
-//        }
-//        puts("");
+        static int iter = 0;
+        const static int MOD_ITER = 10;
+
+        if (iter++ % MOD_ITER != 0) return;
+
         for (int i = 0; i < n_; i++) {
             int targetIndex = rowsol_.at(i);
             if (targetIndex < 1 || targetIndex > n_) continue;

@@ -13,6 +13,10 @@ Emcc toolchain
 - Explore parallelizing Hungarian algorithm
     - CPU-bound: thread-pool + std::thread
     - GPU-bound: no native emcc support for OpenMP, must build compute shaders (seems a bit too much for now)
+        - With this, we can chain compute shaders
+    - https://bluewaters.ncsa.illinois.edu/liferay-content/document-library/18symposium-slides/date-nagi.pdf
+    - Implementing Date/Nagi paper
+    - https://developer.chrome.com/docs/capabilities/web-apis/gpu-compute
 - Run `exert_impulse()` on every iteration to give illusion of real-time. Add flags for both
 - Code refactors (general TODOs)
 - LAPJV (Jonker-Volgenant) algorithm
