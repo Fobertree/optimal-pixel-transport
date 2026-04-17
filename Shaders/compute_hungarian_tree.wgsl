@@ -171,6 +171,9 @@ fn forwardPass(local_id : vec3<u32>) {
             if (Vc[j] == 0) {
                 // TODO: do we need more tiling for nested for loop?
                 for (var i = 0; i < size; i++) {
+                // TODO Fin[i] in tileA
+                // TODO Dr tileB, Dc in tileC
+                // loading Ac into tile might be overkill
                     if (Fin[i]) {
                         // 'active', i.e., neither visited NOR matched
                         if (slack[j] > cost(i,j) - Dr[i] - Dc[j]) {
@@ -204,6 +207,7 @@ fn forwardPass(local_id : vec3<u32>) {
     for (var tileStart = 0; tileStart < size; tileStart += size) {
         let i = tid + tileStart;
         if (i < size) {
+            // TODO: this is kind of ugly - Consider copyBufferToBuffer outside the shader (main.cpp)
             // move Fout to Fin
             Fin[i] = Fout[i];
 
@@ -245,7 +249,6 @@ fn augmentationPass(local_id : vec3<u32>) {
     for (var tileStart = 0u; tileStart < size; tileStart += TILE_SIZE) {
         let i = tid + tileStart;
         if (i < size) {
-            let faug_i = Faug[i];
             var rcur = i;
             var ccur = -1;
             while (rcur != -1) {
