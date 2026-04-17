@@ -1,5 +1,5 @@
 // abstract-float
-const particle_size = 0.138;
+const particle_size = 0.088;
 
 struct Particle {
     position: vec2f,
