@@ -46,7 +46,6 @@ SolverBase *solver;
 std::string renderShaderCode;
 std::string physicsShaderCode;
 std::string solverShaderCode;
-std::string shaderCode;
 
 std::vector<uint16_t> indexData = {
         0, 1, 3,
@@ -94,7 +93,8 @@ void InitParticles() {
 }
 
 void Init() {
-    shaderCode = read_wgsl_file("particle_shader.wgsl");
+    // TODO: fix paths later after shader impl
+    renderShaderCode = read_wgsl_file("particle_shader.wgsl");
     // TimedWaitAny flag - enable timeout on waiting for GPU tasks
     static const auto kTimedWaitAny = wgpu::InstanceFeatureName::TimedWaitAny;
     wgpu::InstanceDescriptor instanceDesc{.requiredFeatureCount = 1,
@@ -166,6 +166,24 @@ void CreateRenderPipeline() {
     // params struct
     uint32_t sizeValue = DIM * DIM;
     Params params{.size = sizeValue};
+
+    /* Load Shader Modules */
+    // TODO: read shader files after impl
+
+    // Solver shader
+    wgpu::ShaderSourceWGSL solverWgsl{{.code=solverShaderCode.c_str()}};
+    wgpu::ShaderModuleDescriptor solverShaderModuleDescriptor{.nextInChain = &solverWgsl};
+    wgpu::ShaderModule solverShaderModule = device.CreateShaderModule(&solverShaderModuleDescriptor);
+
+    // Physics shader
+    wgpu::ShaderSourceWGSL physicsWgsl{{.code=solverShaderCode.c_str()}};
+    wgpu::ShaderModuleDescriptor physicsShaderModuleDescriptor{.nextInChain = &physicsWgsl};
+    wgpu::ShaderModule physicsShaderModule = device.CreateShaderModule(&physicsShaderModuleDescriptor);
+
+    // Render shader
+    wgpu::ShaderSourceWGSL renderWgsl{{.code=renderShaderCode.c_str()}};
+    wgpu::ShaderModuleDescriptor renderShaderModuleDescriptor{.nextInChain = &renderWgsl};
+    wgpu::ShaderModule renderShaderModule = device.CreateShaderModule(&renderShaderModuleDescriptor);
 
     // particle buffer
     wgpu::BufferDescriptor particleBufferDesc{};
@@ -331,6 +349,7 @@ void CreateRenderPipeline() {
     particleBG = device.CreateBindGroup(&particleBGDesc);
 
     /* Pipelines */
+    // TODO: compute pipeline entrypoint specification (especially reduction)
     wgpu::ComputePipelineDescriptor solverPipelineDesc{};
     solverPipelineDesc.layout = solverPipelineLayout;
     solverPipeline = device.CreateComputePipeline(&solverPipelineDesc);
@@ -340,7 +359,19 @@ void CreateRenderPipeline() {
     physicsPipeline = device.CreateComputePipeline(&physicsPipelineDesc);
 
     wgpu::RenderPipelineDescriptor renderPipelineDesc{};
+    wgpu::ColorTargetState colorTargetState{.format=format};
+
+    wgpu::FragmentState fragmentState{
+            .module = renderShaderModule,
+            .entryPoint= "fragmentMain",
+            .targetCount=1,
+            .targets=&colorTargetState
+    };
+
     renderPipelineDesc.layout = renderPipelineLayout;
+    renderPipelineDesc.vertex = {.module = renderShaderModule, .entryPoint = "vertexMain"};
+    renderPipelineDesc.primitive = {.topology = wgpu::PrimitiveTopology::TriangleList};
+    renderPipelineDesc.fragment = &fragmentState;
     renderPipeline = device.CreateRenderPipeline(&renderPipelineDesc);
 
     // Upload data
@@ -374,6 +405,7 @@ void InitGraphics() {
 }
 
 void Render() {
+    static bool firstRender{false};
     particleCPUData = solver->getParticleCPUBuffer(); // this is stupid
     wgpu::SurfaceTexture surfaceTexture;
     surface.GetCurrentTexture(&surfaceTexture);
@@ -389,8 +421,15 @@ void Render() {
 
     wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
 
+    if (!firstRender) {
+        // call reduction first for precompute in hungarian
+        auto pass = encoder.BeginComputePass();
+        // TODO: Implement pass w/ entrypoint
+    }
+
     // Compute
     {
+        // solver
         auto pass = encoder.BeginComputePass();
         pass.SetPipeline(solverPipeline);
         pass.SetBindGroup(0, paramsBG);
@@ -399,6 +438,7 @@ void Render() {
         pass.End();
     }
     {
+        // physics
         auto pass = encoder.BeginComputePass();
         pass.SetPipeline(physicsPipeline);
         pass.SetBindGroup(0, paramsBG);
@@ -436,14 +476,10 @@ void Render() {
             particleCPUData.size() * sizeof(ParticleCPU)
     );
     queue.Submit(1, &commands);
-
-    // step physics
-    // todo: fire this off as some async/promise every N iters or timeframe if too expensive
-    solver->iterate();
 }
 
 int main() {
-    std::cout << shaderCode << std::endl;
+    std::cout << renderShaderCode << std::endl;
     Init();
     InitParticles();
     Start();

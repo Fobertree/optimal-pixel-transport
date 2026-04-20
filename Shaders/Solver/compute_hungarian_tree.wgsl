@@ -72,10 +72,13 @@ fn getMinUncoveredSlack() {
     }
 }
 
-fn reduction(
+@compute @workgroup_size(TILE_SIZE)
+fn reductionMain(
         local_id : vec3<u32>,
         workgroup_id : vec3<u32>
     ) {
+    // creating this as an entrypoint so we can exec only once from CPU side on first invocation
+
     // thread id
     let tid = local_id.x;
     let size = params.size;
@@ -304,22 +307,19 @@ fn computeMain(
     ) {
     let size = params.size;
     // TODO: figure out how to execute reduction only once, and eliminate while loop, because it's a terrible idea
-    reduction(local_id, workgroup_id);
+//    reduction(local_id, workgroup_id);
+    checkOptimality(local_id);
 
-    while (true) {
-        checkOptimality(local_id);
-
-        if (match_count == size) {
-            // solved
-            break;
-        }
-        // forward pass is main bottleneck in alternating tree
-        forwardPass(local_id);
-        reversePass(local_id);
-        augmentationPass(local_id);
-        dualUpdate(local_id, global_invocation_id);
-
-        // TODO: pipe out Ar assignment output each iteration
+    if (match_count == size) {
+        // solved
+        return;
     }
+    // forward pass is main bottleneck in alternating tree
+    forwardPass(local_id);
+    reversePass(local_id);
+    augmentationPass(local_id);
+    dualUpdate(local_id, global_invocation_id);
+
+    // TODO: refactor Ar, Ar should be binded over to assignments buffer for next shader
 }
 
