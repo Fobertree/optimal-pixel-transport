@@ -51,6 +51,7 @@ public:
     [[nodiscard]] size_t length() const { return buf_.size(); }
 
     // TODO: replace this with [] operator overload
+    // TODO: this is ugly - want to have getter that can still be called with const-qualified ParticleBuffer
     Particle *getParticle(int i) {
         if (i >= length())
             throw std::out_of_range("Particle::get - Out of range");

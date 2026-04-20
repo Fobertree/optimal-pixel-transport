@@ -1,6 +1,6 @@
 // Parallelized Hungarian - Alternating Tree
 // Augmenting Tree should be faster than classical for problems as large as ours
-// fluid sim shader will handle physics + fragment
+// designed for N=100,000 at least. Upper-bound by memory constraints
 
 const INT_MAX : i32 = 2147483647;
 const TILE_SIZE : u32 = 256u; // workgroup length
@@ -9,14 +9,6 @@ const MAX_SIZE : u32 = 25000;
 struct Particle {
     position: vec2f,
     color: vec4f
-};
-
-struct Input {
-
-};
-
-struct Output {
-    // to pipe to next shader in pipeline
 };
 
 struct Params {
@@ -311,6 +303,7 @@ fn computeMain(
         @builtin(global_invocation_id) global_invocation_id : vec3<u32>
     ) {
     let size = params.size;
+    // TODO: figure out how to execute reduction only once, and eliminate while loop, because it's a terrible idea
     reduction(local_id, workgroup_id);
 
     while (true) {
@@ -325,6 +318,8 @@ fn computeMain(
         reversePass(local_id);
         augmentationPass(local_id);
         dualUpdate(local_id, global_invocation_id);
+
+        // TODO: pipe out Ar assignment output each iteration
     }
 }
 

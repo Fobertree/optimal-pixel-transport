@@ -127,4 +127,22 @@ auto get_cost_function() {
     return typename CostFunctionTraits<T>::type{};
 }
 
+template<COST_TYPE COST_T, typename T>
+std::vector<T> get_cost_buffer(ParticleBuffer &src_buf, ParticleBuffer &target_buf) {
+    assert(src_buf.length() == target_buf.length());
+    size_t n = src_buf.length();
+    auto cost = get_cost_function<COST_T>();
+    std::vector<T> out;
+    out.reserve(n * n);
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            auto p1 = src_buf.getParticle(i);
+            auto p2 = target_buf.getParticle(j);
+            out.push_back(cost(*p1, *p2));
+        }
+    }
+
+    return out;
+}
+
 #endif //OPTIMALPIXELTRANSPORT_COST_FUNCTION_H
