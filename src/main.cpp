@@ -30,6 +30,7 @@ wgpu::Buffer particleBuffer;
 wgpu::Buffer costBuffer;
 wgpu::Buffer paramsBuffer;
 wgpu::Buffer assignmentsBuffer;
+wgpu::Buffer targetParticleBuffer;
 
 wgpu::ComputePipeline solverPipeline, physicsPipeline;
 wgpu::RenderPipeline renderPipeline;
@@ -38,6 +39,7 @@ wgpu::BindGroup paramsBG, solverBG, particleBG;
 
 // TODO: cleanup after solver impl
 std::vector<ParticleCPU> particleCPUData;
+std::vector<ParticleCPU> targetParticleCPUData;
 
 // ptr for runtime polymorphism
 SolverBase *solver;
@@ -89,7 +91,7 @@ void InitParticles() {
     puts("..");
     using IntegralHungarian = Hungarian<int64_t, COST_TYPE::RGB_DIST_INT_HYBRID>;
     solver = new IntegralHungarian("img_1.png", "img_6.png", 100, 100);
-    particleCPUData = solver->getParticleCPUBuffer();
+    particleCPUData = solver->getParticleCPUBuffer(); // TODO: migrate this to directly parse from particle Buffer
 }
 
 void Init() {
@@ -162,6 +164,7 @@ void CreateRenderPipeline() {
     auto src_buf = ParticleBuffer("img_1.png", DIM, DIM);
     auto tar_buf = ParticleBuffer("img_6.png", DIM, DIM);
     auto cost_buffer = get_cost_buffer<COST_TYPE::RGB_DIST_INT_HYBRID, COST_ITEM_T>(src_buf, tar_buf);
+    targetParticleCPUData = tar_buf.getParticleCPUBuffer();
 
     // params struct
     uint32_t sizeValue = DIM * DIM;
@@ -206,6 +209,13 @@ void CreateRenderPipeline() {
 
     assignmentsBuffer = device.CreateBuffer(&assignmentsBufferDesc);
 
+    // target particle buffer
+    wgpu::BufferDescriptor targetParticleBufferDesc{};
+    targetParticleBufferDesc.size = MAX_CPU_PARTICLES * sizeof(ParticleCPU);
+    targetParticleBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+
+    targetParticleBuffer = device.CreateBuffer(&targetParticleBufferDesc);
+
     // params
     wgpu::BufferDescriptor paramsDesc{};
     paramsDesc.size = sizeof(uint32_t);
@@ -218,9 +228,6 @@ void CreateRenderPipeline() {
     indexBufferDesc.usage = wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst;
 
     indexBuffer = device.CreateBuffer(&indexBufferDesc);
-    particleBuffer = device.CreateBuffer(&particleBufferDesc);
-    costBuffer = device.CreateBuffer(&costBufferDesc);
-    paramsBuffer = device.CreateBuffer(&paramsDesc);
 
     /* Bind Group Layouts */
     // Group 0: Params Bind Group
@@ -236,8 +243,8 @@ void CreateRenderPipeline() {
 
     auto paramsBGL = device.CreateBindGroupLayout(&paramsLayoutDesc);
 
-    // Group 1: Solver BindGroup (assignments, cost)
-    std::array<wgpu::BindGroupLayoutEntry, 2> solverEntries{};
+    // Group 1: Solver BindGroup (assignments, cost, targetParticle)
+    std::array<wgpu::BindGroupLayoutEntry, 3> solverEntries{};
 
     // assignments
     solverEntries[0].binding = 0;
@@ -248,6 +255,11 @@ void CreateRenderPipeline() {
     solverEntries[1].binding = 1;
     solverEntries[1].visibility = wgpu::ShaderStage::Compute;
     solverEntries[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+
+    // target particles
+    solverEntries[2].binding = 2;
+    solverEntries[2].visibility = wgpu::ShaderStage::Compute;
+    solverEntries[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
 
     wgpu::BindGroupLayoutDescriptor solverLayoutDesc{};
     solverLayoutDesc.entryCount = solverEntries.size();
@@ -283,8 +295,8 @@ void CreateRenderPipeline() {
     // Physics pipeline
     std::array<wgpu::BindGroupLayout, 3> physicsLayouts = {
             paramsBGL,  // group 0
-            solverBGL,
-            particleBGL
+            solverBGL,  // group 1
+            particleBGL // group 2
     };
 
     wgpu::PipelineLayoutDescriptor physicsPLDesc{};
@@ -295,8 +307,8 @@ void CreateRenderPipeline() {
 
     // Render pipeline (vertex + fragment shader)
     std::array<wgpu::BindGroupLayout, 2> renderLayouts = {
-            paramsBGL,
-            particleBGL
+            paramsBGL,  // group 0
+            particleBGL // group 1
     };
 
     wgpu::PipelineLayoutDescriptor renderPLDesc{};
@@ -394,6 +406,13 @@ void CreateRenderPipeline() {
             0,
             cost_buffer.data(),
             cost_buffer.size() * sizeof(COST_ITEM_T)
+    );
+
+    queue.WriteBuffer(
+            targetParticleBuffer,
+            0,
+            targetParticleCPUData.data(),
+            MAX_CPU_PARTICLES * sizeof(ParticleCPU)
     );
 
     queue.WriteBuffer(paramsBuffer, 0, &params, sizeof(params));
