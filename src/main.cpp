@@ -35,7 +35,7 @@ wgpu::Buffer targetParticleBuffer;
 wgpu::ComputePipeline solverPipeline, physicsPipeline;
 wgpu::RenderPipeline renderPipeline;
 
-wgpu::BindGroup paramsBG, solverBG, particleBG;
+wgpu::BindGroup paramsBG, solverBG, targetParticleBG;
 
 // TODO: cleanup after solver impl
 std::vector<ParticleCPU> particleCPUData;
@@ -157,6 +157,7 @@ void ConfigureSurface() {
 }
 
 void CreateRenderPipeline() {
+    // TODO: abstract this or reduce LOC bc lowkey unreadable
     using COST_ITEM_T = int;
 
     // cost buffer
@@ -231,20 +232,29 @@ void CreateRenderPipeline() {
 
     /* Bind Group Layouts */
     // Group 0: Params Bind Group
-    wgpu::BindGroupLayoutEntry paramsEntry{};
-    paramsEntry.binding = 0;
-    paramsEntry.visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
-    paramsEntry.buffer.type = wgpu::BufferBindingType::Uniform;
-    paramsEntry.buffer.minBindingSize = sizeof(uint32_t);
+    // TODO: rename bind group later to smth like essentials idk
+    std::vector<wgpu::BindGroupLayoutEntry> paramsEntries{};
+
+    // particles
+    paramsEntries[0].binding = 0;
+    paramsEntries[0].visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
+    paramsEntries[0].buffer.type = wgpu::BufferBindingType::Storage;
+    paramsEntries[0].buffer.minBindingSize = MAX_CPU_PARTICLES * sizeof(ParticleCPU);
+
+    // params
+    paramsEntries[1].binding = 1;
+    paramsEntries[1].visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
+    paramsEntries[1].buffer.type = wgpu::BufferBindingType::Uniform;
+    paramsEntries[1].buffer.minBindingSize = sizeof(Params);
 
     wgpu::BindGroupLayoutDescriptor paramsLayoutDesc{};
-    paramsLayoutDesc.entryCount = 1;
-    paramsLayoutDesc.entries = &paramsEntry;
+    paramsLayoutDesc.entryCount = paramsEntries.size();
+    paramsLayoutDesc.entries = paramsEntries.data();
 
     auto paramsBGL = device.CreateBindGroupLayout(&paramsLayoutDesc);
 
-    // Group 1: Solver BindGroup (assignments, cost, targetParticle)
-    std::array<wgpu::BindGroupLayoutEntry, 3> solverEntries{};
+    // Group 1: Solver BindGroup (assignments, cost)
+    std::array<wgpu::BindGroupLayoutEntry, 2> solverEntries{};
 
     // assignments
     solverEntries[0].binding = 0;
@@ -256,34 +266,28 @@ void CreateRenderPipeline() {
     solverEntries[1].visibility = wgpu::ShaderStage::Compute;
     solverEntries[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
 
-    // target particles
-    solverEntries[2].binding = 2;
-    solverEntries[2].visibility = wgpu::ShaderStage::Compute;
-    solverEntries[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-
     wgpu::BindGroupLayoutDescriptor solverLayoutDesc{};
     solverLayoutDesc.entryCount = solverEntries.size();
     solverLayoutDesc.entries = solverEntries.data();
 
     auto solverBGL = device.CreateBindGroupLayout(&solverLayoutDesc);
 
-    // Group 2: Particles Bind Group
-    wgpu::BindGroupLayoutEntry particleEntry{};
-    particleEntry.binding = 0;
-    particleEntry.visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
-    particleEntry.buffer.type = wgpu::BufferBindingType::Storage;
+    // Group 2: Target Particles Bind Group
+    wgpu::BindGroupLayoutEntry targetParticleEntry{};
+    targetParticleEntry.visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
+    targetParticleEntry.buffer.type = wgpu::BufferBindingType::Storage;
 
     wgpu::BindGroupLayoutDescriptor particleLayoutDesc{};
     particleLayoutDesc.entryCount = 1;
-    particleLayoutDesc.entries = &particleEntry;
+    particleLayoutDesc.entries = &targetParticleEntry;
 
-    auto particleBGL = device.CreateBindGroupLayout(&particleLayoutDesc);
+    auto targetParticleBGL = device.CreateBindGroupLayout(&particleLayoutDesc);
 
     /* Pipeline Layouts */
     // Solver pipeline
     std::array<wgpu::BindGroupLayout, 2> solverLayouts = {
             paramsBGL,  // group 0
-            solverBGL   // group 1
+            solverBGL,  // group 1
     };
 
     wgpu::PipelineLayoutDescriptor solverPLDesc{};
@@ -294,9 +298,9 @@ void CreateRenderPipeline() {
 
     // Physics pipeline
     std::array<wgpu::BindGroupLayout, 3> physicsLayouts = {
-            paramsBGL,  // group 0
-            solverBGL,  // group 1
-            particleBGL // group 2
+            paramsBGL,          // group 0
+            solverBGL,          // group 1
+            targetParticleBGL   // group 2
     };
 
     wgpu::PipelineLayoutDescriptor physicsPLDesc{};
@@ -306,29 +310,28 @@ void CreateRenderPipeline() {
     auto physicsPipelineLayout = device.CreatePipelineLayout(&physicsPLDesc);
 
     // Render pipeline (vertex + fragment shader)
-    std::array<wgpu::BindGroupLayout, 2> renderLayouts = {
-            paramsBGL,  // group 0
-            particleBGL // group 1
-    };
-
     wgpu::PipelineLayoutDescriptor renderPLDesc{};
-    renderPLDesc.bindGroupLayoutCount = renderLayouts.size();
-    renderPLDesc.bindGroupLayouts = renderLayouts.data();
+    renderPLDesc.bindGroupLayoutCount = 1;
+    renderPLDesc.bindGroupLayouts = &paramsBGL; // contains both size + particles
 
     auto renderPipelineLayout = device.CreatePipelineLayout(&renderPLDesc);
 
     /* Bind Groups */
     // group 0 - params
-    wgpu::BindGroupEntry paramsEntryBG{};
-    paramsEntryBG.binding = 0;
-    paramsEntryBG.buffer = paramsBuffer;
-    paramsEntryBG.offset = 0;
-    paramsEntryBG.size = sizeof(params);
+    std::array<wgpu::BindGroupEntry, 2> paramsBGEntries;
+    paramsBGEntries[0].binding = 0;
+    paramsBGEntries[0].buffer = particleBuffer;
+    paramsBGEntries[0].offset = 0;
+
+    paramsBGEntries[1].binding = 1;
+    paramsBGEntries[1].buffer = paramsBuffer;
+    paramsBGEntries[1].offset = 0;
+    paramsBGEntries[1].size = sizeof(params);
 
     wgpu::BindGroupDescriptor paramsBGDesc{};
     paramsBGDesc.layout = paramsBGL;
-    paramsBGDesc.entryCount = 1;
-    paramsBGDesc.entries = &paramsEntryBG;
+    paramsBGDesc.entryCount = paramsBGEntries.size();
+    paramsBGDesc.entries = paramsBGEntries.data();
 
     paramsBG = device.CreateBindGroup(&paramsBGDesc);
 
@@ -353,12 +356,12 @@ void CreateRenderPipeline() {
     particleBGEntry.binding = 0;
     particleBGEntry.buffer = particleBuffer;
 
-    wgpu::BindGroupDescriptor particleBGDesc{};
-    particleBGDesc.layout = particleBGL;
-    particleBGDesc.entryCount = 1;
-    particleBGDesc.entries = &particleBGEntry;
+    wgpu::BindGroupDescriptor targetParticleBGDesc{};
+    targetParticleBGDesc.layout = targetParticleBGL;
+    targetParticleBGDesc.entryCount = 1;
+    targetParticleBGDesc.entries = &particleBGEntry;
 
-    particleBG = device.CreateBindGroup(&particleBGDesc);
+    targetParticleBG = device.CreateBindGroup(&targetParticleBGDesc);
 
     /* Pipelines */
     // TODO: compute pipeline entrypoint specification (especially reduction)
@@ -425,7 +428,7 @@ void InitGraphics() {
 
 void Render() {
     static bool firstRender{false};
-    particleCPUData = solver->getParticleCPUBuffer(); // this is stupid
+    particleCPUData = solver->getParticleCPUBuffer(); // TODO: this is stupid
     wgpu::SurfaceTexture surfaceTexture;
     surface.GetCurrentTexture(&surfaceTexture);
 
@@ -453,7 +456,6 @@ void Render() {
         pass.SetPipeline(solverPipeline);
         pass.SetBindGroup(0, paramsBG);
         pass.SetBindGroup(1, solverBG);
-        pass.DispatchWorkgroups(16); // TODO: set workgroup count
         pass.End();
     }
     {
@@ -462,8 +464,7 @@ void Render() {
         pass.SetPipeline(physicsPipeline);
         pass.SetBindGroup(0, paramsBG);
         pass.SetBindGroup(1, solverBG);
-        pass.SetBindGroup(2, particleBG);
-        pass.DispatchWorkgroups(16);
+        pass.SetBindGroup(2, targetParticleBG);
         pass.End();
     }
 
@@ -474,7 +475,6 @@ void Render() {
     // apply index buffer & bind group
     pass.SetIndexBuffer(indexBuffer, wgpu::IndexFormat::Uint16);
     pass.SetBindGroup(0, paramsBG);
-    pass.SetBindGroup(1, particleBG);
 
     // TODO: modify indexCount later
     pass.DrawIndexed(

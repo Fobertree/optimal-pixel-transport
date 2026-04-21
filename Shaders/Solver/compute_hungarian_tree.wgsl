@@ -20,11 +20,15 @@ struct Params {
 var<workgroup> tileA: array<u32, TILE_SIZE>;
 var<workgroup> tileB: array<u32, TILE_SIZE>;
 
+// group 0 - params
 @group(0) @binding(0) var<storage, read> particles : array<Particle>;
+@group(0) @binding(1) var<storage, read> params : Params;
+
+// group 1 - solver (assignments, costs, targetParticles)
+@group(1) @binding(0) var<stroage, read> assignments : array<i32>;
 
 // Pre-computed on CPU, since very in-expensive and I like the templating
-@group(0) @binding(1) var<storage, read> cost_matrix : array<i32>;
-@group(0) @binding(2) var<storage, read> params : Params;
+@group(1) @binding(1) var<storage, read> cost_matrix : array<i32>;
 
 //var<storage, read_write> tile : array<i32, TILE_SIZE>;
 
