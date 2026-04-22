@@ -2,6 +2,8 @@
 // Augmenting Tree should be faster than classical for problems as large as ours
 // designed for N=100,000 at least. Upper-bound by memory constraints
 
+// TODO: I have a billion mistakes in this and GPU-parallelized Hungarian seems like a pain - scrap for now
+
 const INT_MAX : i32 = 2147483647;
 const TILE_SIZE : u32 = 256u; // workgroup length
 const MAX_SIZE : u32 = 25000;
@@ -12,7 +14,6 @@ struct Particle {
 };
 
 struct Params {
-// TODO replace direct size pass, set params as @binding(2)
     size : u32
 }
 
@@ -25,7 +26,7 @@ var<workgroup> tileB: array<u32, TILE_SIZE>;
 @group(0) @binding(1) var<storage, read> params : Params;
 
 // group 1 - solver (assignments, costs, targetParticles)
-@group(1) @binding(0) var<stroage, read> assignments : array<i32>;
+@group(1) @binding(0) var<stroage, read_write> assignments : array<i32>;
 
 // Pre-computed on CPU, since very in-expensive and I like the templating
 @group(1) @binding(1) var<storage, read> cost_matrix : array<i32>;
