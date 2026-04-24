@@ -1,9 +1,14 @@
+// naive particle shader (adapted to BG)
 // abstract-float
 const particle_size = 0.088;
 
 struct Particle {
     position: vec2f,
     color: vec4f
+}
+
+struct Params {
+    size: u32
 }
 
 struct VertexInput {
@@ -17,8 +22,8 @@ struct VertexOutput {
     // other inter-stage variables alongside @location
 };
 
-@group(0) @binding(0)
-var<storage, read> particles : array<Particle>;
+@group(0) @binding(0) var<storage, read> particles : array<Particle>;
+@group(0) @binding(1) var<storage, read> params : Params;
 
 @vertex
 fn vertexMain(in: VertexInput) -> VertexOutput {
