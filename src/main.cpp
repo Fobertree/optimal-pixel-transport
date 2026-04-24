@@ -181,7 +181,7 @@ void CreateRenderPipeline() {
     wgpu::ShaderModule solverShaderModule = device.CreateShaderModule(&solverShaderModuleDescriptor);
 
     // Physics shader
-    wgpu::ShaderSourceWGSL physicsWgsl{{.code=solverShaderCode.c_str()}};
+    wgpu::ShaderSourceWGSL physicsWgsl{{.code=physicsShaderCode.c_str()}};
     wgpu::ShaderModuleDescriptor physicsShaderModuleDescriptor{.nextInChain = &physicsWgsl};
     wgpu::ShaderModule physicsShaderModule = device.CreateShaderModule(&physicsShaderModuleDescriptor);
 
