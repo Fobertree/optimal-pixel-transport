@@ -454,12 +454,16 @@ void Render() {
     }
     {
         // physics
+        // TODO: replace this temporarily with c++ fluid physics, not compute shader
+#ifdef CPP_PBF
+#else
         auto pass = encoder.BeginComputePass();
         pass.SetPipeline(physicsPipeline);
         pass.SetBindGroup(0, paramsBG);
         pass.SetBindGroup(1, solverBG);
         pass.SetBindGroup(2, targetParticleBG);
         pass.End();
+#endif
     }
 
     // Render

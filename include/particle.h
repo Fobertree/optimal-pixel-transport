@@ -57,12 +57,12 @@ struct ParticleCPU {
     // have to use float since double only works for const
     ParticleCPU(float x, float y) : x(x), y(y) {};
 
-    ParticleCPU(double x, double y, std::array<float, 4> color) : x(x), y(y), r(color[0]), g(color[1]), b(color[2]),
-                                                                  a(color[3]) {};
+    ParticleCPU(float x, float y, std::array<float, 4> color) : x(x), y(y), r(color[0]), g(color[1]), b(color[2]),
+                                                                a(color[3]) {};
     float x, y;
-    float pad[2]; // need padding for vec4f
+    float pad[2]{}; // need padding for vec4f
     // vec4f must start at a 16-byte aligned address
-    float r, g, b, a;
+    float r{}, g{}, b{}, a{};
 //    float color[4];
 };
 
