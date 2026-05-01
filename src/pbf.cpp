@@ -13,25 +13,31 @@ void PBF::iterate() {
     // core
     int iters = 0;
     while (iters++ < solverIterations_) {
-        for (int i = 0; i < n_; i++) {
-            auto particle = particles_[i];
-            // get constrain
-            lambdas_[i] = -1;
-        }
+        // TODO: calculate lambda_i
+        getDensities();
+        getConstraints();
     }
 }
 
-float PBF::getDensity() noexcept {
+float PBF::getDensities() noexcept { // TODO: impl
     // given neighbors p_1 ... p_n, rho_i
     // \rho_i = \sum_j m_j W(p_i - p_j, h)
     // summation over neighbors, with W as smoothing kernel
+    float total_density = 0;
+    float kernel_output = SmoothingKernel::cubicSplineKernel();
 }
 
-int PBF::hashCoords(float xi, float yi, int table_sz) noexcept {
+float PBF::getConstraints() noexcept { // TODO: impl
+    return -1;
+}
+
+int PBF::hashCoords(float x, float y, int table_sz) noexcept {
     // https://matthias-research.github.io/pages/tenMinutePhysics/11-hashing.pdf
     // Not sure if Z-order/Morton or Hilbert curves are better here
     // To handle float w/ Z-order multiply with large integer then floor/round to int
     // Using this 10-minute physics hash function for simplicity
+    int xi = std::floor(x / CELL_SIZE_);
+    int yi = std::floor(y / CELL_SIZE_);
     int h = static_cast<int>(xi * 92837111.) ^ static_cast<int>(yi * 689287499.);
     return std::abs(h) % table_sz;
 }
@@ -43,10 +49,9 @@ std::vector<int> PBF::getSortedParticleIndices(std::span<ParticleCPU> particles)
     // counting sort particleIDs
     // should benchmark vs radix sort later
     size_t sz = particles.size();
-    const static int NUM_BINS = 10; // k
     std::vector<int> hashes(sz);
-    std::vector<int> count(NUM_BINS + 1);
-    std::vector<int> sortedParticleIDs(NUM_BINS + 1); // output
+    std::vector<int> count(NUM_BINS_ + 1);
+    std::vector<int> sortedParticleIDs(NUM_BINS_ + 1); // output
 
     // populate hashes
     std::transform(particles.begin(), particles.end(), hashes.begin(), [&](const ParticleCPU &particle) {
@@ -58,7 +63,7 @@ std::vector<int> PBF::getSortedParticleIndices(std::span<ParticleCPU> particles)
         count[key]++;
     }
 
-    for (int i = 1; i <= NUM_BINS; i++) {
+    for (int i = 1; i <= NUM_BINS_; i++) {
         // prefix
         count[i] = count[i] + count[i - 1];
     }
