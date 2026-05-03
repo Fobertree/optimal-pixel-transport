@@ -28,10 +28,6 @@ public:
 
     virtual ~SolverBase() = default;
 
-    ParticleBuffer &getSrcBuf() { return src_buf_; }
-
-    [[nodiscard]] const ParticleBuffer &getSrcBuf() const { return src_buf_; }
-
     // TODO: BENCHMARK THEN FPS UTIL CLASS
     void iterate() {
         // virtual derived solver

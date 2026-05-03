@@ -16,9 +16,14 @@
 
 // TODO: refactor to factory if want to test other kernels
 // https://interactivecomputergraphics.github.io/physics-simulation/examples/sph_kernel.html
+// https://pysph.readthedocs.io/en/1.0a1/reference/kernels.html
+// TODO: check all the kernel impls - probably wrong
 namespace SmoothingKernel {
     // (x,y) pos vec
-    float cubicSplineKernel(float dx, float dy, float h) noexcept {
+    float cubicSplineKernel(const ParticleCPU &p1, const ParticleCPU &p2, float h) noexcept {
+        // h is smoothing parameter/radius
+        float dx = p1.x - p2.x;
+        float dy = p1.y - p2.y;
         float q = std::sqrt(dx * dx + dy * dy) / h;
 
         // std::pow doesn't throw (returns nan)
@@ -31,16 +36,23 @@ namespace SmoothingKernel {
         return 0;
     }
 
-    float gradientCubicSplineKernel(float dx, float dy, float h) noexcept {
-        // derived from analytic solution, unlike gradient of field quantities
-        float q = std::sqrt(dx * dx + dy * dy) / h;
+    std::pair<float, float> gradientCubicSplineKernel(const ParticleCPU &p1, const ParticleCPU &p2, float h) noexcept {
+        // analytic gradient
+        float dx = p1.x - p2.x;
+        float dy = p1.y - p2.y;
+        float q = std::sqrt(dx * dx + dy * dy) / h; // r/h
+        float dW_dq;
 
         if (q < 1) {
-            return -3 * q + 2.25 * q * q;
+            dW_dq = -3 * q + 2.25 * q * q;
         } else if (q < 2) {
-            return -0.75 * std::pow(2 - q, 2);
+            dW_dq = -0.75f * std::pow(2.0f - q, 2.0f);
+        } else {
+            return {0.0f, 0.0f};
         }
-        return 0;
+
+        float scale = dW_dq / (h * q);
+        return {scale * dx, scale * dy};
     }
 }
 
@@ -57,9 +69,13 @@ public:
                                                                                          solverIterations_(
                                                                                                  solverIterations) {
         n_ = particles.size();
-        constraintGradients_ = std::vector<float>(n_);
+        constraints_ = std::vector<float>(n_);
         lambdas_ = std::vector<float>(n_);
-        firstInBin_ = std::vector<int>(NUM_BINS_, -1);
+        binStart_ = std::vector<int>(NUM_BINS_, -1);
+        binEnd_ = std::vector<int>(NUM_BINS_, -1); // not necessary, just for readability
+        binIDs_ = std::vector<int>(n_, -1);
+        deltaPosX_ = std::vector<float>(n_, -1);
+        deltaPosY_ = std::vector<float>(n_, -1);
     }
 
     void iterate();
@@ -67,24 +83,35 @@ public:
 private:
     [[nodiscard]] std::vector<int> getSortedParticleIndices(std::span<ParticleCPU> particles);
 
-    [[nodiscard]] float getConstraints() noexcept;
+    void getLambdas(const std::vector<int> &sortedParticleIndices);
 
-    [[nodiscard]] float getDensities() noexcept;
+    void getDeltaPos(const std::vector<int> &sortedParticleIndices);
+
+    void updatePositions();
+
 
     int hashCoords(float xi, float yi, int table_sz) noexcept;
 
-    constexpr static int NUM_BINS_ = 10.;
+    // TODO: figure out what this should be set to. Too low - unintended collisions + slow
+    // Also looking into a way to identify or pass assertions that detect collision vulnerabilities
+    constexpr static int NUM_BINS_ = 100000;
     constexpr static float CELL_SIZE_ = 1 / NUM_BINS_;
 
     std::vector<ParticleCPU> particles_;
-    std::vector<float> constraintGradients_;
+    std::vector<float> constraints_;
     std::vector<float> lambdas_;
     std::vector<float> rho_;
+    std::vector<float> deltaPosX_;
+    std::vector<float> deltaPosY_;
     // TODO: maybe an auxilliary vector that stores first particle in vector within sorted bin
-    std::vector<int> firstInBin_; // aux vector storing first particle idx in vector within sorted bin
+    std::vector<int> binStart_; // aux vector storing first particle idx in vector within sorted bin
     int solverIterations_;
     size_t n_;
     float rho_0_; // resting density
+    float EPS_;
+
+    std::vector<int> binEnd_;    // index inclusive
+    std::vector<int> binIDs_;
 };
 
 #endif //OPTIMALPIXELTRANSPORT_PBF_H
