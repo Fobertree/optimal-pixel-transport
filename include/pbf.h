@@ -97,6 +97,8 @@ public:
         veloNewX_ = std::vector<float>(n_);
         veloNewY_ = std::vector<float>(n_);
         omega_ = std::vector<float>(n_);
+        // target bin size ~ 2h
+        H_ = 1 / (2 * NUM_BINS_);
     }
 
     void iterate();
@@ -121,10 +123,11 @@ private:
 
     // TODO: figure out what this should be set to. Too low - unintended collisions + slow
     // Also looking into a way to identify or pass assertions that detect collision vulnerabilities
-    constexpr static int NUM_BINS_ = 100000;
+    constexpr static int NUM_BINS_ = 50'000;
     constexpr static float CELL_SIZE_ = 1 / NUM_BINS_;
     constexpr static float EPS_ = 1e-8;
     constexpr static float DT_ = 1;
+    int H_;
 
     std::vector<ParticleCPU> particles_;
     std::vector<float> constraints_;

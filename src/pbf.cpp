@@ -27,7 +27,7 @@ void PBF::iterate() {
     }
 }
 
-void PBF::getLambdas(const std::vector<int> &sortedParticleIndices) { // TODO: impl
+void PBF::getLambdas(const std::vector<int> &sortedParticleIndices) {
     for (int pid = 0; pid < sortedParticleIndices.size(); pid++) { // i
         int binID = binIDs_[pid];
         // lambda
@@ -43,7 +43,7 @@ void PBF::getLambdas(const std::vector<int> &sortedParticleIndices) { // TODO: i
 
         for (int npid = start; npid <= end; npid++) {
             auto nei_particle = particles_[sortedParticleIndices[npid]];
-            auto kernel_output = SmoothingKernel::cubicSplineKernel(particle, nei_particle, 0.5); // TODO: adjust h
+            auto kernel_output = SmoothingKernel::cubicSplineKernel(particle, nei_particle, H_);
 
             // density
             // assume equal unit mass
@@ -61,7 +61,7 @@ void PBF::getLambdas(const std::vector<int> &sortedParticleIndices) { // TODO: i
                     auto nei_particle = particles_[sortedParticleIndices[j_npid]];
                     auto [gradient_kernel_x, gradient_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle,
                                                                                                              nei_particle,
-                                                                                                             0.5); // TODO: adjust h
+                                                                                                             H_);
                     float sq_norm = gradient_kernel_x * gradient_kernel_x + gradient_kernel_y * gradient_kernel_y;
                     lambda_denom += recip_rho_0 * recip_rho_0 * sq_norm;
                 }
@@ -71,7 +71,7 @@ void PBF::getLambdas(const std::vector<int> &sortedParticleIndices) { // TODO: i
                 auto nei_particle = particles_[sortedParticleIndices[k_npid]];
                 auto [gradient_kernel_x, gradient_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle,
                                                                                                          nei_particle,
-                                                                                                         0.5); // TODO: adjust h
+                                                                                                         H_);
                 float sq_norm = gradient_kernel_x * gradient_kernel_x + gradient_kernel_y * gradient_kernel_y;
                 lambda_denom += recip_rho_0 * recip_rho_0 * sq_norm;
             }
@@ -101,18 +101,17 @@ void PBF::getDeltaPos(const std::vector<int> &sortedParticleIndices) {
             auto nei_particle = particles_[j_pid];
             auto [gradient_kernel_x, gradient_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle,
                                                                                                      nei_particle,
-                                                                                                     0.5); // TODO: change h
+                                                                                                     H_);
 
             float lambda_i = lambdas_[i_pid];
             float lambda_j = lambdas_[j_pid];
 
             // tensile instability
             float k = 0.1;
-            float h = 0.5;
-            float delta_q = 0.2 * h;
+            float delta_q = 0.2 * H_;
             int n = 4;
-            float kernel_output = SmoothingKernel::cubicSplineKernel(particle, nei_particle, h);
-            float W_delta = SmoothingKernel::cubicSplineKernel(delta_q, h);
+            float kernel_output = SmoothingKernel::cubicSplineKernel(particle, nei_particle, H_);
+            float W_delta = SmoothingKernel::cubicSplineKernel(delta_q, H_);
             float s_corr = -k * std::pow(kernel_output / W_delta, n);
 
             totalX += (lambda_i + lambda_j + s_corr) * gradient_kernel_x;
@@ -157,7 +156,7 @@ void PBF::vorticityConfinementAndViscosity(const std::vector<int> &sortedParticl
             float v_ijx = veloX_[j] - veloX_[i];
             float v_ijy = veloY_[j] - veloY_[j];
             auto [grad_kernel_x, grad_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle, nei_particle,
-                                                                                             0.5);
+                                                                                             H_);
 
             // a x b = x1y2 - y1x2
             omega_i += v_ijx * grad_kernel_y - v_ijy * grad_kernel_x;
@@ -177,7 +176,7 @@ void PBF::vorticityConfinementAndViscosity(const std::vector<int> &sortedParticl
             int pid_j = sortedParticleIndices[j];
             auto nei_particle = particles_[pid_j];
             auto [grad_kernel_x, grad_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle, nei_particle,
-                                                                                             0.5);
+                                                                                             H_);
             eta_x += ((std::abs(omega_[i]) - std::abs(omega_[j])) / rho_[j]) * grad_kernel_x;
             eta_y += ((std::abs(omega_[i]) - std::abs(omega_[j])) / rho_[j]) * grad_kernel_y;
         }
