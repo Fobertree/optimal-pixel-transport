@@ -36,6 +36,20 @@ namespace SmoothingKernel {
         return 0;
     }
 
+    float cubicSplineKernel(float delta_q, float h) noexcept {
+        // h is smoothing parameter/radius
+        float q = delta_q / h;
+
+        // std::pow doesn't throw (returns nan)
+        // check via std::isnan not necessary since will never hit numbers that overflow
+        if (q < 1) {
+            return 2 / 3. - q * q + 0.5 * std::pow(q, 3);
+        } else if (q < 2) {
+            return 1 / 6. * std::pow(2 - q, 3);
+        }
+        return 0;
+    }
+
     std::pair<float, float> gradientCubicSplineKernel(const ParticleCPU &p1, const ParticleCPU &p2, float h) noexcept {
         // analytic gradient
         float dx = p1.x - p2.x;
@@ -76,6 +90,13 @@ public:
         binIDs_ = std::vector<int>(n_, -1);
         deltaPosX_ = std::vector<float>(n_, -1);
         deltaPosY_ = std::vector<float>(n_, -1);
+        veloX_ = std::vector<float>(n_);
+        veloY_ = std::vector<float>(n_);
+        vorticityForceX_ = std::vector<float>(n_);
+        vorticityForceY_ = std::vector<float>(n_);
+        veloNewX_ = std::vector<float>(n_);
+        veloNewY_ = std::vector<float>(n_);
+        omega_ = std::vector<float>(n_);
     }
 
     void iterate();
@@ -87,7 +108,13 @@ private:
 
     void getDeltaPos(const std::vector<int> &sortedParticleIndices);
 
-    void updatePositions();
+    void updatePositionStar();
+
+    void updateVelocities();
+
+    void vorticityConfinementAndViscosity(const std::vector<int> &sortedParticleIndices);
+
+    void updatePosition();
 
 
     int hashCoords(float xi, float yi, int table_sz) noexcept;
@@ -96,6 +123,8 @@ private:
     // Also looking into a way to identify or pass assertions that detect collision vulnerabilities
     constexpr static int NUM_BINS_ = 100000;
     constexpr static float CELL_SIZE_ = 1 / NUM_BINS_;
+    constexpr static float EPS_ = 1e-8;
+    constexpr static float DT_ = 1;
 
     std::vector<ParticleCPU> particles_;
     std::vector<float> constraints_;
@@ -103,15 +132,28 @@ private:
     std::vector<float> rho_;
     std::vector<float> deltaPosX_;
     std::vector<float> deltaPosY_;
+    // x^*
+    std::vector<float> posStarX_;
+    std::vector<float> posStarY_;
+    // v
+    std::vector<float> veloX_;
+    std::vector<float> veloY_;
+
+    std::vector<float> vorticityForceX_;
+    std::vector<float> vorticityForceY_;
+
+    std::vector<float> veloNewX_;
+    std::vector<float> veloNewY_;
+
+    std::vector<float> omega_;
     // TODO: maybe an auxilliary vector that stores first particle in vector within sorted bin
+    std::vector<int> binIDs_;
     std::vector<int> binStart_; // aux vector storing first particle idx in vector within sorted bin
     int solverIterations_;
     size_t n_;
     float rho_0_; // resting density
-    float EPS_;
 
     std::vector<int> binEnd_;    // index inclusive
-    std::vector<int> binIDs_;
 };
 
 #endif //OPTIMALPIXELTRANSPORT_PBF_H

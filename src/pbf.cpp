@@ -10,18 +10,20 @@ void PBF::iterate() {
 
     // find neighboring particles
     // Argsort to match future compute shader logic - argsort buffer of structs, dk tradeoff in spatial locality
+    // TODO: clean up indexing everywhere or drop argsort for direct sort - argsort + direct indexing is bug-prone
     auto particleIndices = getSortedParticleIndices(particles_);
 
     // core
     int iters = 0;
     while (iters++ < solverIterations_) {
-        // TODO: calculate lambda_i
         getLambdas(particleIndices);
         getDeltaPos(particleIndices);
         // since we don't have solids, can skip collision detection
-        // SPH already pushes particles away via density constraints, so no extra logic needed
-        updatePositions();
-        // TODO: vorticity confinement
+        // SPH already pushes particles away via density constraints, so no extra logic needed for collision
+        updatePositionStar();
+        updateVelocities();
+        vorticityConfinementAndViscosity(particleIndices);
+        updatePosition();
     }
 }
 
@@ -83,12 +85,13 @@ void PBF::getDeltaPos(const std::vector<int> &sortedParticleIndices) {
     float rho_0_recip = 1 / rho_0_;
 
     for (int i = 0; i < n_; i++) {
-        float delta_p = 0;
         int i_pid = sortedParticleIndices[i];
         auto particle = particles_[i_pid];
 
-        int start = binStart_[i];
-        int end = binEnd_[i];
+        int binID = binIDs_[i_pid];
+        int start = binStart_[binID];
+        int end = binEnd_[binID];
+
         float totalX = 0;
         float totalY = 0;
 
@@ -103,19 +106,102 @@ void PBF::getDeltaPos(const std::vector<int> &sortedParticleIndices) {
             float lambda_i = lambdas_[i_pid];
             float lambda_j = lambdas_[j_pid];
 
-            totalX += (lambda_i + lambda_j) * gradient_kernel_x;
-            totalY += (lambda_i + lambda_j) * gradient_kernel_y;
+            // tensile instability
+            float k = 0.1;
+            float h = 0.5;
+            float delta_q = 0.2 * h;
+            int n = 4;
+            float kernel_output = SmoothingKernel::cubicSplineKernel(particle, nei_particle, h);
+            float W_delta = SmoothingKernel::cubicSplineKernel(delta_q, h);
+            float s_corr = -k * std::pow(kernel_output / W_delta, n);
+
+            totalX += (lambda_i + lambda_j + s_corr) * gradient_kernel_x;
+            totalY += (lambda_i + lambda_j + s_corr) * gradient_kernel_y;
         }
         deltaPosX_[i_pid] = rho_0_recip * totalX;
         deltaPosY_[i_pid] = rho_0_recip * totalY;
     }
 }
 
-void PBF::updatePositions() {
+void PBF::updatePositionStar() {
     // do not need argsort indices. Being direct for efficiency
     for (int i = 0; i < n_; i++) {
-        particles_[i].x += deltaPosX_[i];
-        particles_[i].y += deltaPosY_[i];
+        posStarX_[i] = particles_[i].x + deltaPosX_[i];
+        posStarY_[i] = particles_[i].y + deltaPosY_[i];
+    }
+}
+
+void PBF::updateVelocities() {
+    for (int i = 0; i < n_; i++) {
+        float x_ix = particles_[i].x;
+        float x_iy = particles_[i].y;
+        veloX_[i] = 1 / DT_ * (posStarX_[i] - x_ix);
+        veloY_[i] = 1 / DT_ * (posStarY_[i] - x_iy);
+    }
+}
+
+void PBF::vorticityConfinementAndViscosity(const std::vector<int> &sortedParticleIndices) {
+    for (int i = 0; i < n_; i++) {
+        int pid = sortedParticleIndices[i];
+        int binID = binIDs_[pid];
+        int start = binStart_[binID];
+        int end = binEnd_[binID];
+        auto particle = particles_[pid];
+        float omega_i = 0;
+        const float C = 0.01;
+        float viscosity_sum = 0;
+        for (int j = start; j <= end; j++) {
+            int pid_j = sortedParticleIndices[j];
+            auto nei_particle = particles_[pid_j];
+
+            float v_ijx = veloX_[j] - veloX_[i];
+            float v_ijy = veloY_[j] - veloY_[j];
+            auto [grad_kernel_x, grad_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle, nei_particle,
+                                                                                             0.5);
+
+            // a x b = x1y2 - y1x2
+            omega_i += v_ijx * grad_kernel_y - v_ijy * grad_kernel_x;
+
+            // can also do XSPH viscosity in same loop
+            viscosity_sum += v_ijx * grad_kernel_x + v_ijy * grad_kernel_y;
+        }
+        veloNewX_[i] = veloX_[i] + C * viscosity_sum;
+        veloNewY_[i] = veloY_[i] + C * viscosity_sum;
+        omega_[i] = omega_i;
+
+        float eta_x = 0;
+        float eta_y = 0;
+        // Need another loop since we needed omega to be precomputed for eta gradient
+        // \eta_i = \nabla_i |\omega|_i = \sum_j m_j \frac{|\omega|_j - |\omega|_i}{\rho_j} \nabla_i W_{ij}
+        for (int j = start; j <= end; j++) {
+            int pid_j = sortedParticleIndices[j];
+            auto nei_particle = particles_[pid_j];
+            auto [grad_kernel_x, grad_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle, nei_particle,
+                                                                                             0.5);
+            eta_x += ((std::abs(omega_[i]) - std::abs(omega_[j])) / rho_[j]) * grad_kernel_x;
+            eta_y += ((std::abs(omega_[i]) - std::abs(omega_[j])) / rho_[j]) * grad_kernel_y;
+        }
+        // norm to unit
+        float norm_divisor = std::sqrt(eta_x * eta_x + eta_y * eta_y);
+        eta_x /= norm_divisor;
+        eta_y /= norm_divisor;
+
+        // cross product with scalar on RHS here intuitively becomes 90 degrees CCW by right-hand-rule
+        // perp vector: (-Ny, Nx)
+        float f_vorticity_x = EPS_ * omega_[i] * (-eta_y);
+        float f_vorticity_y = EPS_ * omega_[i] * eta_x;
+
+        // direct euler step force into velocity
+        // TODO: veloNewX may be redundant with posStar. Should be able to /= DT then add vorticity + viscosity contributions
+        veloNewX_[i] += DT_ * f_vorticity_x;
+        veloNewY_[i] += DT_ * f_vorticity_y;
+    }
+}
+
+void PBF::updatePosition() {
+    for (int i = 0; i < n_; i++) {
+        particles_[i].x += veloNewX_[i] * DT_;
+        particles_[i].y += veloNewY_[i] * DT_;
     }
 }
 
