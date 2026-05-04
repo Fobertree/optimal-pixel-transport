@@ -28,7 +28,8 @@ void PBF::iterate() {
 }
 
 void PBF::getLambdas(const std::vector<int> &sortedParticleIndices) {
-    for (int pid = 0; pid < sortedParticleIndices.size(); pid++) { // i
+    for (int i = 0; i < sortedParticleIndices.size(); i++) { // i
+        int pid = sortedParticleIndices[i];
         int binID = binIDs_[pid];
         // lambda
 
@@ -149,12 +150,11 @@ void PBF::vorticityConfinementAndViscosity(const std::vector<int> &sortedParticl
         float omega_i = 0;
         const float C = 0.01;
         float viscosity_sum = 0;
-        for (int j = start; j <= end; j++) {
-            int pid_j = sortedParticleIndices[j];
+        for (int pid_j = start; pid_j <= end; pid_j++) {
             auto nei_particle = particles_[pid_j];
 
-            float v_ijx = veloX_[j] - veloX_[i];
-            float v_ijy = veloY_[j] - veloY_[j];
+            float v_ijx = veloX_[pid_j] - veloX_[pid];
+            float v_ijy = veloY_[pid_j] - veloY_[pid];
             auto [grad_kernel_x, grad_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle, nei_particle,
                                                                                              H_);
 
@@ -164,21 +164,20 @@ void PBF::vorticityConfinementAndViscosity(const std::vector<int> &sortedParticl
             // can also do XSPH viscosity in same loop
             viscosity_sum += v_ijx * grad_kernel_x + v_ijy * grad_kernel_y;
         }
-        veloNewX_[i] = veloX_[i] + C * viscosity_sum;
-        veloNewY_[i] = veloY_[i] + C * viscosity_sum;
-        omega_[i] = omega_i;
+        veloNewX_[pid] = veloX_[pid] + C * viscosity_sum;
+        veloNewY_[pid] = veloY_[pid] + C * viscosity_sum;
+        omega_[pid] = omega_i;
 
         float eta_x = 0;
         float eta_y = 0;
         // Need another loop since we needed omega to be precomputed for eta gradient
         // \eta_i = \nabla_i |\omega|_i = \sum_j m_j \frac{|\omega|_j - |\omega|_i}{\rho_j} \nabla_i W_{ij}
-        for (int j = start; j <= end; j++) {
-            int pid_j = sortedParticleIndices[j];
+        for (int pid_j = start; pid_j <= end; pid_j++) {
             auto nei_particle = particles_[pid_j];
             auto [grad_kernel_x, grad_kernel_y] = SmoothingKernel::gradientCubicSplineKernel(particle, nei_particle,
                                                                                              H_);
-            eta_x += ((std::abs(omega_[i]) - std::abs(omega_[j])) / rho_[j]) * grad_kernel_x;
-            eta_y += ((std::abs(omega_[i]) - std::abs(omega_[j])) / rho_[j]) * grad_kernel_y;
+            eta_x += ((std::abs(omega_[pid]) - std::abs(omega_[pid_j])) / rho_[pid_j]) * grad_kernel_x;
+            eta_y += ((std::abs(omega_[pid]) - std::abs(omega_[pid_j])) / rho_[pid_j]) * grad_kernel_y;
         }
         // norm to unit
         float norm_divisor = std::sqrt(eta_x * eta_x + eta_y * eta_y);
@@ -187,13 +186,13 @@ void PBF::vorticityConfinementAndViscosity(const std::vector<int> &sortedParticl
 
         // cross product with scalar on RHS here intuitively becomes 90 degrees CCW by right-hand-rule
         // perp vector: (-Ny, Nx)
-        float f_vorticity_x = EPS_ * omega_[i] * (-eta_y);
-        float f_vorticity_y = EPS_ * omega_[i] * eta_x;
+        float f_vorticity_x = EPS_ * omega_[pid] * (-eta_y);
+        float f_vorticity_y = EPS_ * omega_[pid] * eta_x;
 
         // direct euler step force into velocity
         // TODO: veloNewX may be redundant with posStar. Should be able to /= DT then add vorticity + viscosity contributions
-        veloNewX_[i] += DT_ * f_vorticity_x;
-        veloNewY_[i] += DT_ * f_vorticity_y;
+        veloNewX_[pid] += DT_ * f_vorticity_x;
+        veloNewY_[pid] += DT_ * f_vorticity_y;
     }
 }
 
