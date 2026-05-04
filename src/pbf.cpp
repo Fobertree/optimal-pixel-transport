@@ -5,8 +5,8 @@
 #include "pbf.h"
 
 // this file is basically garbage temp code that I will refactor later
-void PBF::iterate() {
-    // skip apply ext forces
+void PBF::iterate(std::span<int> assignments) {
+    applyAssignmentForces(assignments);
 
     // find neighboring particles
     // Argsort to match future compute shader logic - argsort buffer of structs, dk tradeoff in spatial locality
@@ -24,6 +24,19 @@ void PBF::iterate() {
         updateVelocities();
         vorticityConfinementAndViscosity(particleIndices);
         updatePosition();
+    }
+}
+
+void PBF::applyAssignmentForces(std::span<int> assignments) {
+    for (int i = 0; i < n_; i++) {
+        auto particle = particles_[i];
+        auto assigned_particle = particles_[assignments[i]];
+
+        float dx = assigned_particle.x - particle.x;
+        float dy = assigned_particle.y - particle.y;
+
+        posStarX_[i] += dx * DT_;
+        posStarY_[i] += dy * DT_;
     }
 }
 

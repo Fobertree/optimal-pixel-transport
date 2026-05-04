@@ -101,10 +101,12 @@ public:
         H_ = 1 / (2 * NUM_BINS_);
     }
 
-    void iterate();
+    void iterate(std::span<int> assignments);
 
 private:
     [[nodiscard]] std::vector<int> getSortedParticleIndices(std::span<ParticleCPU> particles);
+
+    void applyAssignmentForces(std::span<int> assignments);
 
     void getLambdas(const std::vector<int> &sortedParticleIndices);
 
