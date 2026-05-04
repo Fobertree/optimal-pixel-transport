@@ -1,6 +1,7 @@
 //
 // Created by Alexander Liu on 4/3/26.
 //
+// do not use BUG-RIDDEN - just a C++ poc before wgsl port
 
 #ifndef OPTIMALPIXELTRANSPORT_PBF_H
 #define OPTIMALPIXELTRANSPORT_PBF_H

@@ -1,6 +1,7 @@
 //
 // Created by Alexander Liu on 4/29/26.
 //
+// do not use BUG-RIDDEN - just a C++ poc before wgsl port
 
 #include "pbf.h"
 
