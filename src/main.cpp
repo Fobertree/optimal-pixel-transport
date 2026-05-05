@@ -454,16 +454,13 @@ void Render() {
     }
     {
         // physics
-        // TODO: replace this temporarily with c++ fluid physics, not compute shader
-#ifdef CPP_PBF
-#else
+        // TODO: impl wgsl
         auto pass = encoder.BeginComputePass();
         pass.SetPipeline(physicsPipeline);
         pass.SetBindGroup(0, paramsBG);
         pass.SetBindGroup(1, solverBG);
         pass.SetBindGroup(2, targetParticleBG);
         pass.End();
-#endif
     }
 
     // Render
@@ -492,10 +489,6 @@ void Render() {
             particleCPUData.size() * sizeof(ParticleCPU)
     );
     queue.Submit(1, &commands);
-
-    // step physics
-    // todo: fire this off as some async/promise every N iters or timeframe if too expensive
-    solver->iterate();
 }
 
 int main() {

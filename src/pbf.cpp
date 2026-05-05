@@ -5,6 +5,15 @@
 
 #include "pbf.h"
 
+/*
+ * Abandoning this, just wanted attempt at 'pseudocode':
+ * Mistakes:
+ * - improper neighborhood check: needs to be by radius, check in 3x3 grid of bins
+ * - widespread general initialization, sizing, OOB issues (not wgsl-related)
+ * - sloppy sort/behavior access - do getter by call hash function on floor (position / bin size)
+ *      - Argsort good, but should do by binStart + binCount
+ */
+
 // this file is basically garbage temp code that I will refactor later
 void PBF::iterate(std::span<int> assignments) {
     applyAssignmentForces(assignments);
