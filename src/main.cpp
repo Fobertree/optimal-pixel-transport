@@ -317,6 +317,8 @@ void CreateRenderPipeline() {
 
     auto renderPipelineLayout = device.CreatePipelineLayout(&renderPLDesc);
 
+    // TODO: update BG grouping
+    // TODO: abstract verbose binding setup into functions for readability
     /* Bind Groups */
     // group 0 - params
     std::array<wgpu::BindGroupEntry, 2> paramsBGEntries;
@@ -442,6 +444,8 @@ void Render() {
             .colorAttachments = &attachment};
 
     wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+
+    // TODO: update BG grouping
 
     // Compute
     {
