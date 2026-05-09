@@ -39,14 +39,16 @@ struct Params {
 // TODO: migrate to target positions + figure out which BG this belongs in
 @group(2) @binding(0) var<storage, read> target_particles : array<Particle>; // not sure if should move to solver BG
 // main pbf simulation stuff
+// TODO: move positions + velocities to particles struct
 @group(2) @binding(0) var<storage, read_write> positions: array<vec2f>;
 @group(2) @binding(1) var<storage, read_write> velocities: array<vec2f>;
+
 @group(2) @binding(2) var<storage, read_write> lambdas: array<f32>;
 @group(2) @binding(3) var<storage, read_write> deltaPos: array<vec2f>;
 @group(2) @binding(4) var<storage, read_write> posStar: array<vec2f>;       // predicted positions
 @group(2) @binding(5) var<storage, read_write> binStart: array<i32>;
 @group(2) @binding(6) var<storage, read_write> binCount: array<atomic<u32>>;
-@group(2) @binding(7) var<storage, read_write> omegas: array<f32>;          // memoize for vorticity confinement
+@group(2) @binding(7) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
 
 /* utils */
 fn hashCoords(pos: vec2f) -> u32 {
@@ -85,7 +87,7 @@ fn computeMain(
     var vel = velocities[idx];
     let targetIdx = assignments[idx];
     if (targetIdx >= 0 && targetIdx < i32(n)) {
-        let targetPos = targetPositions[u32(targetIdx)];
+        let targetPos = posStar[u32(targetIdx)];
         let dir = targetPos - pos;
         let dist = length(dir);
         if (dist > 0.0001) {
@@ -97,6 +99,8 @@ fn computeMain(
     posStar[idx] = pos + vel * dt;
 
     // Counting pass
+    // particles must already be sorted by hash coords
+    // TODO: radix sort wgsl impl: https://shi-yan.github.io/webgpuunleashed/Compute/radix_sort.html
     let bin = hashCoords(posStar[idx]);
     atomicAdd(&binCount[bin], 1u);
 }
@@ -113,7 +117,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let eps = 1e-8;
 
     let pos = posStar[idx];
-    let bin = hashCoords(posPrime);
+    let bin = hashCoords(pos);
 
     // calc density + lambda
     var density: f32 = 0.0;
@@ -143,6 +147,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // avoid obvious 0
                 if (dist > H || dist < 0.0001) { continue; }
+                let q = dist / H;
 
                 // cubic spline kernel
                 if (q < 1.0) {
@@ -177,7 +182,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let nb = hashCoords(posPrime);
             let start = binStart[nb];
-            let cnt = atomicLoad(&binCout[nb]);
+            let cnt = atomicLoad(&binCount[nb]);
 
             for (var j: u32 = 0u; j < cnt; j++) {
                 let jIdx = u32(start) + j;
@@ -210,6 +215,8 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let n = 4.0;
                 let W_delta = 1.0/6.0 * pow(2.0 - delta_q/H, 3.0);
                 let s_corr = -k * pow(w / W_delta, n);
+
+                dPos += (lambda_i + lambda_j + s_corr) * grad;
             }
         }
     } // end neighbor bin accumulation
@@ -221,9 +228,8 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     positions[idx] = newPos;
 
     let newVel = (newPos - pos) / dt;
-    velocities[idx] = newVal;
+    velocities[idx] = newVel;
 
-    // TODO: vorticity confinement + XSPH
     // XSPH viscosity
     let C: f32 = 0.01;
     var omega_i: f32 = 0;
@@ -263,14 +269,14 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let dW: f32 = 0;
 
                 if (q < 1) {
-                    dW = -3 * q + 2.25 * q*q;
+                    dw = -3 * q + 2.25 * q*q;
                 } else if (q < 2) {
-                    dW = -0.75 * pow(2.0 - q, 2);
+                    dw = -0.75 * pow(2.0 - q, 2);
                 } else {
-                    dW = 0;
+                    dw = 0;
                 }
 
-                let scale = dW / (H * q);
+                let scale = dw / (H * q);
                 let grad = scale * r;
 
                 omega_i += v_ij.x * grad.y - v_ij.y * grad.x;
@@ -299,21 +305,21 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (dist > H || dist < 0.0001) {continue;}
 
                 let q = dist/H;
-                let dW: f32 = 0;
+                let dw: f32 = 0;
 
-                if (q < 1) {
-                    dW = -3 * q + 2.25 * q*q;
-                } else if (q < 2) {
-                    dW = -0.75 * pow(2.0 - q, 2);
+                if (q < 1.0) {
+                    dw = -3 * q + 2.25 * q*q;
+                } else if (q < 2.0) {
+                    dw = -0.75 * pow(2.0 - q, 2);
                 } else {
-                    dW = 0;
+                    dw = 0;
                 }
 
-                let scale = dW / (H * q);
+                let scale = dw / (H * q);
                 let grad = scale * r;
 
                 // since in 2D, we modify the math a little
-                eta += ((abs(omega[idx]) - abs(omega[jIdx])) / rho[jIdx]) * grad;
+                eta += ((abs(omega[idx]) - abs(omega[jIdx])) / (rho[jIdx] + eps)) * grad;
             } // end neighbor search for bin
         }
     } // end neighbor bin accumulation
