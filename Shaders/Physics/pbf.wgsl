@@ -10,6 +10,7 @@ const NUM_BINS : u32 = 50000u;
 
 struct Particle {
     position: vec2f,
+    velocity: vec2f, // TODO: consolidate velocity (rm binding)
     color: vec4f
 };
 
@@ -43,6 +44,7 @@ struct Params {
 @group(2) @binding(0) var<storage, read_write> positions: array<vec2f>;
 @group(2) @binding(1) var<storage, read_write> velocities: array<vec2f>;
 
+// Not sure if these need to be binded
 @group(2) @binding(2) var<storage, read_write> lambdas: array<f32>;
 @group(2) @binding(3) var<storage, read_write> deltaPos: array<vec2f>;
 @group(2) @binding(4) var<storage, read_write> posStar: array<vec2f>;       // predicted positions
@@ -58,11 +60,7 @@ fn hashCoords(pos: vec2f) -> u32 {
     let h = (xi * 92837111) ^ (yi * 689287499);
     return u32(abs(h)) % params.numBins;
 }
-
-fn getBin2D(bin: u32) -> vec2i {
-    // TODO: impl
-    return vec2i(0); // placeholder
-}
+/* end utils */
 
 @compute @workgroup_size(TILE_SIZE)
 fn computeMain(
@@ -100,7 +98,7 @@ fn computeMain(
 
     // Counting pass
     // particles must already be sorted by hash coords
-    // TODO: radix sort wgsl impl: https://shi-yan.github.io/webgpuunleashed/Compute/radix_sort.html
+    // TODO: radix sort wgsl impl in another shader
     let bin = hashCoords(posStar[idx]);
     atomicAdd(&binCount[bin], 1u);
 }
@@ -167,7 +165,10 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     } // end neighbor bin accumulation
     let C = density * invRho0 - 1.0;
-    lambdas[idx] = -C / (gradSum + eps);
+    lambdas[idx] = -C / (gradSum + eps); // TODO: Need to compute all lambdas
+
+    // Sync to ensure all lambdas are calculated
+    workgroupBarrier();
 
     // deltaPos (with tensile instability)
     var dPos = vec2f(0.0);
