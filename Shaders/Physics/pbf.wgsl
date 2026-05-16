@@ -109,7 +109,6 @@ fn computeMain(
 fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     let n = params.size;
-    if (idx >= n) {return;}
 
     let H = params.H;
     let rho0 = params.rho0;
@@ -124,6 +123,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     var gradSum: f32 = 0.0;             // lambda denominator
 
     // 3x3 bin neighborhood search
+    if (idx < n) { // Need this spaghetti because all invocations must hit workgroupBarrier or indefinitely hangs
     for (var dx = -1; dx <= i32(1); dx++) {
         for (var dy = -1; dy <= i32(1); dy++) {
             // TODO: add support for local_invocation_id and modify control flow to not screw over workgroup barrier
@@ -167,10 +167,13 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     } // end neighbor bin accumulation
     let C = density * invRho0 - 1.0;
-    lambdas[idx] = -C / (gradSum + eps); // TODO: Need to compute all lambdas
+    lambdas[idx] = -C / (gradSum + eps);
+}
 
     // Sync to ensure all lambdas are calculated
     workgroupBarrier();
+
+    if (idx >= n) {return;}
 
     // deltaPos (with tensile instability)
     var dPos = vec2f(0.0);
