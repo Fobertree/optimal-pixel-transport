@@ -1,5 +1,6 @@
 // Impl taken from: https://github.com/kishimisu/WebGPU-Radix-Sort/blob/main/src/shaders/prefix_sum.js
 // https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda
+// Base-4 radix instead of base-2 for efficiency, meaning 0x3 mask
 
 struct Particle {
     position: vec2f,
@@ -7,9 +8,10 @@ struct Particle {
     color: vec4f
 };
 
-@group(0) @binding(0) var<storage, read> input: array<Particle>;
+@group(0) @binding(0) var<storage, read> input: array<u32>;
 @group(0) @binding(1) var<storage, read_write> local_prefix_sums: array<u32>; // sort hashes
 @group(0) @binding(2) var<storage, read_write> block_sums: array<u32>;
+@group(0) @binding(3) var<storage, read_write> particles : array<Particle>;
 
 override WORKGROUP_COUNT: u32;
 override THREADS_PER_WORKGROUP: u32;
@@ -19,17 +21,6 @@ override CURRENT_BIT: u32;
 override ELEMENT_COUNT: u32;
 
 var<workgroup> s_prefix_sum: array<u32, 2 * (THREADS_PER_WORKGROUP + 1)>;
-
-/* utils */
-fn hashCoords(particle: Particle) -> u32 {
-    let pos = particle.position;
-    // 10 minute physics hash, can replace with Z-order
-    let xi = i32(floor(pos.x / params.cellSize));
-    let yi = i32(floor(pos.y / params.cellSize));
-    let h = (xi * 92837111) ^ (yi * 689287499);
-    return u32(abs(h)) % params.numBins;
-}
-/* end utils */
 
 @compute @workgroup_size(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, 1)
 fn radix_sort(
@@ -42,7 +33,7 @@ fn radix_sort(
     let GID = WID + TID; // Global thread ID
 
     // Extract 2 bits from the input
-    let elm = select(hashCoords(input[GID]), 0, GID >= ELEMENT_COUNT);
+    let elm = select(input[GID], 0, GID >= ELEMENT_COUNT);
     let extract_bits: u32 = (elm >> CURRENT_BIT) & 0x3;
 
     var bit_prefix_sums = array<u32, 4>(0, 0, 0, 0);

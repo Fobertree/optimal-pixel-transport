@@ -1,6 +1,7 @@
 // Impl taken from: https://github.com/kishimisu/WebGPU-Radix-Sort/blob/main/src/shaders/prefix_sum.js
 // https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda
-// Almost counting sort subroutine - prefix sum on counts for starting position
+// Almost counting sort subroutine - prefix sum on bin counts for starting position for each bin
+// Get starting position of each digit in the array
 
 struct Particle {
     position: vec2f,
@@ -8,8 +9,10 @@ struct Particle {
     color: vec4f
 };
 
-@group(0) @binding(0) var<storage, read_write> items: array<u32>; // should be array of hashes
+// output should be prefix sum/accumulation of counts of each bin (based on hash % num bins)
+@group(0) @binding(0) var<storage, read_write> output: array<u32>; // output - should be prefix by starting pos
 @group(0) @binding(1) var<storage, read_write> blockSums: array<u32>;
+@group(0) @binding(2) var<storage, read_write> particles: Particle;
 
 override WORKGROUP_SIZE_X: u32;
 override WORKGROUP_SIZE_Y: u32;
@@ -49,8 +52,8 @@ fn reduce_downsweep(
     let ELM_GID = GID * 2; // Element pair global ID
 
     // Load input to shared memory
-    temp[ELM_TID]     = select(items[ELM_GID], 0, ELM_GID >= ELEMENT_COUNT);
-    temp[ELM_TID + 1] = select(items[ELM_GID + 1], 0, ELM_GID + 1 >= ELEMENT_COUNT);
+    temp[ELM_TID]     = select(hashCoords(particles[ELM_GID]), 0, ELM_GID >= ELEMENT_COUNT);
+    temp[ELM_TID + 1] = select(hashCoords(particles[ELM_GID + 1]), 0, ELM_GID + 1 >= ELEMENT_COUNT);
 
     var offset: u32 = 1;
 
@@ -98,12 +101,12 @@ fn reduce_downsweep(
     if (ELM_GID >= ELEMENT_COUNT) {
         return;
     }
-    items[ELM_GID] = temp[ELM_TID];
+    output[ELM_GID] = temp[ELM_TID];
 
     if (ELM_GID + 1 >= ELEMENT_COUNT) {
         return;
     }
-    items[ELM_GID + 1] = temp[ELM_TID + 1];
+    output[ELM_GID + 1] = temp[ELM_TID + 1];
 }
 
 /*
@@ -128,11 +131,11 @@ fn add_block_sums(
 
     let blockSum = blockSums[WORKGROUP_ID];
 
-    items[ELM_ID] += blockSum;
+    output[ELM_ID] += blockSum;
 
     if (ELM_ID + 1 >= ELEMENT_COUNT) {
         return;
     }
 
-    items[ELM_ID + 1] += blockSum;
+    output[ELM_ID + 1] += blockSum;
 }

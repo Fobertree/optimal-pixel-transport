@@ -2,6 +2,7 @@
 Resources:
 - https://mmacklin.com/pbf_sig_preprint.pdf (too lazy to find final print)
 - https://people.engr.tamu.edu/sueda/courses/CSCE450/2022F/projects/Brandon_Nguyen/index.html#:~:text=Description%C2%A7,one%20physics%20step%20per%20frame.
+- https://gpuopen.com/download/Introduction_to_GPU_Radix_Sort.pdf
 */
 
 const TILE_SIZE : u32 = 256u; // workgroup length
@@ -19,7 +20,7 @@ struct Params {
     size : u32,
     rho0 : f32,
     H: f32,         // kernel smoothing radius
-    dt: f32,
+    dt: f32,        // TODO: instead of hardcoding this, maybe expose this to CFL conditions
     solverIterations: u32,
     cellSize: f32,
     numBins: u32,
@@ -57,6 +58,8 @@ fn hashCoords(pos: vec2f) -> u32 {
     // 10 minute physics hash, can replace with Z-order
     let xi = i32(floor(pos.x / params.cellSize));
     let yi = i32(floor(pos.y / params.cellSize));
+    // Believe you can arbitrarily xor these numbers * any set of arbitrarily large prime (or coprime) numbers
+    // Wonder if there's any analytical/non-empirical way to validate effectiveness against hash-collisions
     let h = (xi * 92837111) ^ (yi * 689287499);
     return u32(abs(h)) % params.numBins;
 }
@@ -97,8 +100,7 @@ fn computeMain(
     posStar[idx] = pos + vel * dt;
 
     // Counting pass
-    // particles must already be sorted by hash coords
-    // TODO: radix sort wgsl impl in another shader
+    // NOTE: this logic relies on particles being already sorted by bin hash
     let bin = hashCoords(posStar[idx]);
     atomicAdd(&binCount[bin], 1u);
 }
