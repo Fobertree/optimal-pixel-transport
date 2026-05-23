@@ -28,20 +28,30 @@ wgpu::RenderPipeline pipeline;
 wgpu::Queue queue;
 
 wgpu::Buffer indexBuffer;
+// global
 wgpu::Buffer particleBuffer;
-wgpu::Buffer costBuffer;
 wgpu::Buffer paramsBuffer;
+// solver
 wgpu::Buffer assignmentsBuffer;
-wgpu::Buffer targetParticleBuffer;
+wgpu::Buffer costBuffer;
+// pbf
+wgpu::Buffer lambdasBuffer;
+wgpu::Buffer deltaPosBuffer;
+wgpu::Buffer posStarBuffer;
+wgpu::Buffer binStartBuffer;
+wgpu::Buffer binCountBuffer;
+wgpu::Buffer omegaBuffer;
+// radix
+wgpu::Buffer localPrefixSumBuffer;
+wgpu::Buffer prefixBlockSumBuffer;
+wgpu::Buffer auxParticleSortBuffer; // naive auxiliary buffer since radix sort is not in-place, so copy back
 
-wgpu::ComputePipeline solverPipeline, physicsPipeline;
+wgpu::ComputePipeline solverPipeline, physicsPipeline, radixPipeline;
 wgpu::RenderPipeline renderPipeline;
 
-wgpu::BindGroup paramsBG, solverBG, targetParticleBG;
+wgpu::BindGroup globalBG, solverBG, physicsBG, radixBG;
 
-// TODO: cleanup after solver impl
 std::vector<ParticleCPU> particleCPUData;
-std::vector<ParticleCPU> targetParticleCPUData;
 
 // ptr for runtime polymorphism
 SolverBase *solver;
@@ -60,6 +70,13 @@ std::vector<uint16_t> indexData = {
 
 struct Params {
     uint32_t size;
+    // C++ standard doesn't guarantee 32-bit float
+    float rho0;
+    float H;
+    float dt;
+    uint32_t solverIterations;
+    float cellSize;
+    uint32_t numBins;
 };
 
 void Start() {
@@ -166,7 +183,6 @@ void CreateRenderPipeline() {
     auto src_buf = ParticleBuffer("img_1.png", DIM, DIM);
     auto tar_buf = ParticleBuffer("img_6.png", DIM, DIM);
     auto cost_buffer = get_cost_buffer<COST_TYPE::RGB_DIST_INT_HYBRID, COST_ITEM_T>(src_buf, tar_buf);
-    targetParticleCPUData = tar_buf.getParticleCPUBuffer();
 
     // params struct
     uint32_t sizeValue = DIM * DIM;
@@ -190,12 +206,30 @@ void CreateRenderPipeline() {
     wgpu::ShaderModuleDescriptor renderShaderModuleDescriptor{.nextInChain = &renderWgsl};
     wgpu::ShaderModule renderShaderModule = device.CreateShaderModule(&renderShaderModuleDescriptor);
 
+    /* Create Buffers */
+    // TODO: abstract buffer creation into util
+    // index buffer
+    wgpu::BufferDescriptor indexBufferDesc{};
+    indexBufferDesc.size = indexData.size() * sizeof(uint16_t);
+    indexBufferDesc.usage = wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst;
+
+    indexBuffer = device.CreateBuffer(&indexBufferDesc);
+
     // particle buffer
     wgpu::BufferDescriptor particleBufferDesc{};
     particleBufferDesc.size = MAX_CPU_PARTICLES * sizeof(ParticleCPU);
     particleBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
 
     particleBuffer = device.CreateBuffer(&particleBufferDesc);
+
+
+    // params
+    wgpu::BufferDescriptor paramsDesc{};
+    paramsDesc.size = sizeof(uint32_t);
+    paramsDesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+    paramsBuffer = device.CreateBuffer(&paramsDesc);
+
+    // Solver
 
     // cost buffer
     wgpu::BufferDescriptor costBufferDesc{};
@@ -211,48 +245,93 @@ void CreateRenderPipeline() {
 
     assignmentsBuffer = device.CreateBuffer(&assignmentsBufferDesc);
 
-    // target particle buffer
-    wgpu::BufferDescriptor targetParticleBufferDesc{};
-    targetParticleBufferDesc.size = MAX_CPU_PARTICLES * sizeof(ParticleCPU);
-    targetParticleBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+    // radix
+    size_t sz = particleCPUData.size();
+    // local prefix sum buffer
+    wgpu::BufferDescriptor localPrefixSumBufferDesc{};
+    localPrefixSumBufferDesc.size = sz * sizeof(int);
+    localPrefixSumBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
 
-    targetParticleBuffer = device.CreateBuffer(&targetParticleBufferDesc);
+    localPrefixSumBuffer = device.CreateBuffer(&localPrefixSumBufferDesc);
 
-    // params
-    wgpu::BufferDescriptor paramsDesc{};
-    paramsDesc.size = sizeof(uint32_t);
-    paramsDesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
-    paramsBuffer = device.CreateBuffer(&paramsDesc);
+    // block sum buffer
+    wgpu::BufferDescriptor prefixBlockSumBufferDesc{};
+    prefixBlockSumBufferDesc.size = sz * sizeof(int);
+    prefixBlockSumBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
 
-    // index buffer
-    wgpu::BufferDescriptor indexBufferDesc{};
-    indexBufferDesc.size = indexData.size() * sizeof(uint16_t);
-    indexBufferDesc.usage = wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst;
+    prefixBlockSumBuffer = device.CreateBuffer(&prefixBlockSumBufferDesc);
 
-    indexBuffer = device.CreateBuffer(&indexBufferDesc);
+    // aux particle sort buffer
+    wgpu::BufferDescriptor auxParticleSortBufferDesc{};
+    auxParticleSortBufferDesc.size = MAX_CPU_PARTICLES * sizeof(ParticleCPU);
+    auxParticleSortBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+
+    auxParticleSortBuffer = device.CreateBuffer(&auxParticleSortBufferDesc);
+
+    // PBF/Physics
+    // lambda
+    wgpu::BufferDescriptor lambdasBufferDesc{};
+    lambdasBufferDesc.size = sz * sizeof(int);
+    lambdasBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+
+    lambdasBuffer = device.CreateBuffer(&lambdasBufferDesc);
+
+    // deltaPos
+    wgpu::BufferDescriptor deltaPosBufferDesc{};
+    deltaPosBufferDesc.size = sz * sizeof(int);
+    deltaPosBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+
+    deltaPosBuffer = device.CreateBuffer(&deltaPosBufferDesc);
+
+    // posStar
+    wgpu::BufferDescriptor posStarBufferDesc{};
+    posStarBufferDesc.size = sz * sizeof(int);
+    posStarBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+
+    posStarBuffer = device.CreateBuffer(&posStarBufferDesc);
+
+    // binStart
+    wgpu::BufferDescriptor binStartBufferDesc{};
+    binStartBufferDesc.size = sz * sizeof(int);
+    binStartBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+
+    binStartBuffer = device.CreateBuffer(&binStartBufferDesc);
+
+    // binCount
+    wgpu::BufferDescriptor binCountBufferDesc{};
+    binCountBufferDesc.size = sz * sizeof(int);
+    binCountBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+
+    binCountBuffer = device.CreateBuffer(&binCountBufferDesc);
+
+    // omegaBuffer
+    wgpu::BufferDescriptor omegaBufferDesc{};
+    omegaBufferDesc.size = sz * sizeof(int);
+    omegaBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+
+    binCountBuffer = device.CreateBuffer(&omegaBufferDesc);
 
     /* Bind Group Layouts */
-    // Group 0: Params Bind Group
-    // TODO: rename bind group later to smth like essentials idk
-    std::vector<wgpu::BindGroupLayoutEntry> paramsEntries{};
+    // Group 0: Global Bind Group
+    std::vector<wgpu::BindGroupLayoutEntry> globalEntries{};
 
     // particles
-    paramsEntries[0].binding = 0;
-    paramsEntries[0].visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
-    paramsEntries[0].buffer.type = wgpu::BufferBindingType::Storage;
-    paramsEntries[0].buffer.minBindingSize = MAX_CPU_PARTICLES * sizeof(ParticleCPU);
+    globalEntries[0].binding = 0;
+    globalEntries[0].visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
+    globalEntries[0].buffer.type = wgpu::BufferBindingType::Storage;
+    globalEntries[0].buffer.minBindingSize = MAX_CPU_PARTICLES * sizeof(ParticleCPU);
 
     // params
-    paramsEntries[1].binding = 1;
-    paramsEntries[1].visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
-    paramsEntries[1].buffer.type = wgpu::BufferBindingType::Uniform;
-    paramsEntries[1].buffer.minBindingSize = sizeof(Params);
+    globalEntries[1].binding = 1;
+    globalEntries[1].visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
+    globalEntries[1].buffer.type = wgpu::BufferBindingType::Uniform;
+    globalEntries[1].buffer.minBindingSize = sizeof(Params);
 
     wgpu::BindGroupLayoutDescriptor paramsLayoutDesc{};
-    paramsLayoutDesc.entryCount = paramsEntries.size();
-    paramsLayoutDesc.entries = paramsEntries.data();
+    paramsLayoutDesc.entryCount = globalEntries.size();
+    paramsLayoutDesc.entries = globalEntries.data();
 
-    auto paramsBGL = device.CreateBindGroupLayout(&paramsLayoutDesc);
+    auto globalBGL = device.CreateBindGroupLayout(&paramsLayoutDesc);
 
     // Group 1: Solver BindGroup (assignments, cost)
     std::array<wgpu::BindGroupLayoutEntry, 2> solverEntries{};
@@ -273,21 +352,73 @@ void CreateRenderPipeline() {
 
     auto solverBGL = device.CreateBindGroupLayout(&solverLayoutDesc);
 
-    // Group 2: Target Particles Bind Group
-    wgpu::BindGroupLayoutEntry targetParticleEntry{};
-    targetParticleEntry.visibility = wgpu::ShaderStage::Compute | wgpu::ShaderStage::Vertex;
-    targetParticleEntry.buffer.type = wgpu::BufferBindingType::Storage;
+    // Group 2: Physics (Unique PBF buffers)
+    std::array<wgpu::BindGroupLayoutEntry, 6> physicsEntries;
+    // lambda
+    physicsEntries[0].binding = 0;
+    physicsEntries[0].visibility = wgpu::ShaderStage::Compute;
+    physicsEntries[0].buffer.type = wgpu::BufferBindingType::Storage;
 
-    wgpu::BindGroupLayoutDescriptor particleLayoutDesc{};
-    particleLayoutDesc.entryCount = 1;
-    particleLayoutDesc.entries = &targetParticleEntry;
+    // deltaPos
+    physicsEntries[1].binding = 1;
+    physicsEntries[1].visibility = wgpu::ShaderStage::Compute;
+    physicsEntries[1].buffer.type = wgpu::BufferBindingType::Storage;
 
-    auto targetParticleBGL = device.CreateBindGroupLayout(&particleLayoutDesc);
+    // posStar
+    physicsEntries[2].binding = 2;
+    physicsEntries[2].visibility = wgpu::ShaderStage::Compute;
+    physicsEntries[2].buffer.type = wgpu::BufferBindingType::Storage;
+
+    // binStart
+    physicsEntries[3].binding = 3;
+    physicsEntries[3].visibility = wgpu::ShaderStage::Compute;
+    physicsEntries[3].buffer.type = wgpu::BufferBindingType::Storage;
+
+    // binCount
+    physicsEntries[4].binding = 4;
+    physicsEntries[4].visibility = wgpu::ShaderStage::Compute;
+    physicsEntries[4].buffer.type = wgpu::BufferBindingType::Storage;
+
+    // omega
+    physicsEntries[5].binding = 5;
+    physicsEntries[5].visibility = wgpu::ShaderStage::Compute;
+    physicsEntries[5].buffer.type = wgpu::BufferBindingType::Storage;
+
+    wgpu::BindGroupLayoutDescriptor physicsLayoutDesc{};
+    physicsLayoutDesc.entryCount = physicsEntries.size();
+    physicsLayoutDesc.entries = physicsEntries.data();
+
+    auto physicsBGL = device.CreateBindGroupLayout(&physicsLayoutDesc);
+
+    // Group 4: Radix Sort
+    std::array<wgpu::BindGroupLayoutEntry, 3> radixEntries;
+
+    // local prefix sum
+    radixEntries[0].binding = 0;
+    radixEntries[0].visibility = wgpu::ShaderStage::Compute;
+    radixEntries[0].buffer.type = wgpu::BufferBindingType::Storage;
+
+    // block sum
+    radixEntries[1].binding = 1;
+    radixEntries[1].visibility = wgpu::ShaderStage::Compute;
+    radixEntries[1].buffer.type = wgpu::BufferBindingType::Storage;
+
+    // output particles - tmp buffer for swap
+    // TODO: I don't like this binding - replace it with something better
+    radixEntries[2].binding = 2;
+    radixEntries[2].visibility = wgpu::ShaderStage::Compute;
+    radixEntries[2].buffer.type = wgpu::BufferBindingType::Storage;
+
+    wgpu::BindGroupLayoutDescriptor radixLayoutDesc{};
+    radixLayoutDesc.entryCount = radixEntries.size();
+    radixLayoutDesc.entries = radixEntries.data();
+
+    auto radixBGL = device.CreateBindGroupLayout(&radixLayoutDesc);
 
     /* Pipeline Layouts */
     // Solver pipeline
     std::array<wgpu::BindGroupLayout, 2> solverLayouts = {
-            paramsBGL,  // group 0
+            globalBGL,  // group 0
             solverBGL,  // group 1
     };
 
@@ -297,11 +428,22 @@ void CreateRenderPipeline() {
 
     auto solverPipelineLayout = device.CreatePipelineLayout(&solverPLDesc);
 
-    // Physics pipeline
-    std::array<wgpu::BindGroupLayout, 3> physicsLayouts = {
-            paramsBGL,          // group 0
+    // Radix
+    std::array<wgpu::BindGroupLayout, 2> radixLayouts = {
+            globalBGL,          // group 0
+            radixBGL,           // group 1
+    };
+    wgpu::PipelineLayoutDescriptor radixPLDesc{};
+    radixPLDesc.bindGroupLayoutCount = radixLayouts.size();
+    radixPLDesc.bindGroupLayouts = radixLayouts.data();
+
+    auto radixPipelineLayout = device.CreatePipelineLayout(&radixPLDesc);
+
+    // Physics (PBF) pipeline
+    std::array<wgpu::BindGroupLayout, 4> physicsLayouts = {
+            globalBGL,          // group 0
             solverBGL,          // group 1
-            targetParticleBGL   // group 2
+            physicsBGL,         // group 2
     };
 
     wgpu::PipelineLayoutDescriptor physicsPLDesc{};
@@ -313,7 +455,7 @@ void CreateRenderPipeline() {
     // Render pipeline (vertex + fragment shader)
     wgpu::PipelineLayoutDescriptor renderPLDesc{};
     renderPLDesc.bindGroupLayoutCount = 1;
-    renderPLDesc.bindGroupLayouts = &paramsBGL; // contains both size + particles
+    renderPLDesc.bindGroupLayouts = &globalBGL; // contains both size + particles
 
     auto renderPipelineLayout = device.CreatePipelineLayout(&renderPLDesc);
 
@@ -321,22 +463,22 @@ void CreateRenderPipeline() {
     // TODO: abstract verbose binding setup into functions for readability
     /* Bind Groups */
     // group 0 - params
-    std::array<wgpu::BindGroupEntry, 2> paramsBGEntries;
-    paramsBGEntries[0].binding = 0;
-    paramsBGEntries[0].buffer = particleBuffer;
-    paramsBGEntries[0].offset = 0;
+    std::array<wgpu::BindGroupEntry, 2> globalBGEntries;
+    globalBGEntries[0].binding = 0;
+    globalBGEntries[0].buffer = particleBuffer;
+    globalBGEntries[0].offset = 0;
 
-    paramsBGEntries[1].binding = 1;
-    paramsBGEntries[1].buffer = paramsBuffer;
-    paramsBGEntries[1].offset = 0;
-    paramsBGEntries[1].size = sizeof(params);
+    globalBGEntries[1].binding = 1;
+    globalBGEntries[1].buffer = paramsBuffer;
+    globalBGEntries[1].offset = 0;
+    globalBGEntries[1].size = sizeof(params);
 
-    wgpu::BindGroupDescriptor paramsBGDesc{};
-    paramsBGDesc.layout = paramsBGL;
-    paramsBGDesc.entryCount = paramsBGEntries.size();
-    paramsBGDesc.entries = paramsBGEntries.data();
+    wgpu::BindGroupDescriptor globalBGDesc{};
+    globalBGDesc.layout = globalBGL;
+    globalBGDesc.entryCount = globalBGEntries.size();
+    globalBGDesc.entries = globalBGEntries.data();
 
-    paramsBG = device.CreateBindGroup(&paramsBGDesc);
+    globalBG = device.CreateBindGroup(&globalBGDesc);
 
     // group 1 - solver
     std::array<wgpu::BindGroupEntry, 2> solverBGEntries;
@@ -354,24 +496,65 @@ void CreateRenderPipeline() {
 
     solverBG = device.CreateBindGroup(&solverBGDesc);
 
-    // group 2 - particle
-    wgpu::BindGroupEntry particleBGEntry{};
-    particleBGEntry.binding = 0;
-    particleBGEntry.buffer = particleBuffer;
+    // group 2 - physics (PBF)
+    std::array<wgpu::BindGroupEntry, 6> physicsBGEntries;
+    physicsBGEntries[0].binding = 0;
+    physicsBGEntries[0].buffer = lambdasBuffer;
 
-    wgpu::BindGroupDescriptor targetParticleBGDesc{};
-    targetParticleBGDesc.layout = targetParticleBGL;
-    targetParticleBGDesc.entryCount = 1;
-    targetParticleBGDesc.entries = &particleBGEntry;
+    physicsBGEntries[1].binding = 1;
+    physicsBGEntries[1].buffer = deltaPosBuffer;
 
-    targetParticleBG = device.CreateBindGroup(&targetParticleBGDesc);
+    physicsBGEntries[2].binding = 2;
+    physicsBGEntries[2].buffer = posStarBuffer;
+
+    physicsBGEntries[3].binding = 3;
+    physicsBGEntries[3].buffer = binStartBuffer;
+
+    physicsBGEntries[4].binding = 4;
+    physicsBGEntries[4].buffer = binCountBuffer;
+
+    physicsBGEntries[5].binding = 5;
+    physicsBGEntries[5].buffer = omegaBuffer;
+
+    wgpu::BindGroupDescriptor physicsBGDesc{};
+    physicsBGDesc.layout = physicsBGL;
+    physicsBGDesc.entryCount = physicsBGEntries.size();
+    physicsBGDesc.entries = physicsBGEntries.data();
+
+    physicsBG = device.CreateBindGroup(&physicsBGDesc);
+
+    // group 3 - radix group
+    std::array<wgpu::BindGroupEntry, 3> radixBGEntries;
+
+    radixBGEntries[0].binding = 0;
+    radixBGEntries[0].buffer = localPrefixSumBuffer;
+
+    radixBGEntries[1].binding = 1;
+    radixBGEntries[1].buffer = prefixBlockSumBuffer;
+
+    radixBGEntries[2].binding = 2;
+    radixBGEntries[2].buffer = auxParticleSortBuffer;
+
+    wgpu::BindGroupDescriptor radixBGDesc{};
+    radixBGDesc.layout = radixBGL;
+    radixBGDesc.entryCount = radixBGEntries.size();
+    radixBGDesc.entries = radixBGEntries.data();
+
+    radixBG = device.CreateBindGroup(&radixBGDesc);
 
     /* Pipelines */
     // TODO: compute pipeline entrypoint specification (especially reduction)
+    // solver
     wgpu::ComputePipelineDescriptor solverPipelineDesc{};
     solverPipelineDesc.layout = solverPipelineLayout;
     solverPipeline = device.CreateComputePipeline(&solverPipelineDesc);
 
+    // radix
+    wgpu::ComputePipelineDescriptor radixPipelineDesc{};
+    radixPipelineDesc.layout = renderPipelineLayout;
+    radixPipeline = device.CreateComputePipeline(&radixPipelineDesc);
+
+    // pbf
     wgpu::ComputePipelineDescriptor physicsPipelineDesc{};
     solverPipelineDesc.layout = physicsPipelineLayout;
     physicsPipeline = device.CreateComputePipeline(&physicsPipelineDesc);
@@ -400,12 +583,15 @@ void CreateRenderPipeline() {
             indexData.size() * sizeof(uint16_t)
     );
 
+    // solver
     queue.WriteBuffer(
             particleBuffer,
             0,
             particleCPUData.data(),
             MAX_CPU_PARTICLES * sizeof(ParticleCPU)
     );
+
+    queue.WriteBuffer(paramsBuffer, 0, &params, sizeof(params));
 
     queue.WriteBuffer(
             costBuffer,
@@ -414,14 +600,74 @@ void CreateRenderPipeline() {
             cost_buffer.size() * sizeof(COST_ITEM_T)
     );
 
+    // radix
     queue.WriteBuffer(
-            targetParticleBuffer,
+            localPrefixSumBuffer,
             0,
-            targetParticleCPUData.data(),
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
+
+    queue.WriteBuffer(
+            prefixBlockSumBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
+
+    queue.WriteBuffer(
+            auxParticleSortBuffer,
+            0,
+            particleCPUData.data(),
             MAX_CPU_PARTICLES * sizeof(ParticleCPU)
     );
 
-    queue.WriteBuffer(paramsBuffer, 0, &params, sizeof(params));
+    // physics
+    queue.WriteBuffer(
+            lambdasBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
+
+
+    queue.WriteBuffer(
+            deltaPosBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
+
+
+    queue.WriteBuffer(
+            posStarBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
+
+
+    queue.WriteBuffer(
+            binStartBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
+
+
+    queue.WriteBuffer(
+            binCountBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
+
+    queue.WriteBuffer(
+            omegaBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
 }
 
 void InitGraphics() {
@@ -452,18 +698,24 @@ void Render() {
         // solver
         auto pass = encoder.BeginComputePass();
         pass.SetPipeline(solverPipeline);
-        pass.SetBindGroup(0, paramsBG);
+        pass.SetBindGroup(0, globalBG);
         pass.SetBindGroup(1, solverBG);
         pass.End();
     }
     {
+        // radix sort hashes (for bins)
+        auto pass = encoder.BeginComputePass();
+        pass.SetPipeline(radixPipeline);
+        pass.SetBindGroup(0, globalBG);
+        pass.SetBindGroup(1, radixBG);
+    }
+    {
         // physics
-        // TODO: impl wgsl
         auto pass = encoder.BeginComputePass();
         pass.SetPipeline(physicsPipeline);
-        pass.SetBindGroup(0, paramsBG);
+        pass.SetBindGroup(0, globalBG);
         pass.SetBindGroup(1, solverBG);
-        pass.SetBindGroup(2, targetParticleBG);
+        pass.SetBindGroup(2, physicsBG);
         pass.End();
     }
 
@@ -473,7 +725,7 @@ void Render() {
     pass.SetPipeline(renderPipeline);
     // apply index buffer & bind group
     pass.SetIndexBuffer(indexBuffer, wgpu::IndexFormat::Uint16);
-    pass.SetBindGroup(0, paramsBG);
+    pass.SetBindGroup(0, globalBG);
 
     pass.DrawIndexed(
             6,

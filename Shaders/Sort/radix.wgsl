@@ -1,5 +1,6 @@
 // Impl taken from: https://github.com/kishimisu/WebGPU-Radix-Sort/blob/main/src/shaders/prefix_sum.js
 // https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda
+// https://www.sci.utah.edu/~csilva/papers/cgf.pdf
 // Base-4 radix instead of base-2 for efficiency, meaning 0x3 mask
 
 struct Particle {
@@ -8,10 +9,25 @@ struct Particle {
     color: vec4f
 };
 
-@group(0) @binding(0) var<storage, read> input: array<u32>;
-@group(0) @binding(1) var<storage, read_write> local_prefix_sums: array<u32>; // sort hashes
-@group(0) @binding(2) var<storage, read_write> block_sums: array<u32>;
-@group(0) @binding(3) var<storage, read_write> particles : array<Particle>;
+struct Params {
+    // Below: unused (just for BG consistency)
+    size : u32,
+    rho0 : f32,
+    H: f32,         // kernel smoothing radius
+    dt: f32,        // TODO: instead of hardcoding this, maybe expose this to CFL conditions
+    solverIterations: u32,
+    cellSize: f32,
+    numBins: u32,
+}
+
+// Global BG
+@group(0) @binding(0) var<storage, read> inputParticles: array<Particle>;
+@group(0) @binding(1) var<storage, read> params : Params;
+
+// Radix BG
+@group(1) @binding(0) var<storage, read_write> local_prefix_sums: array<u32>; // sort hashes
+@group(1) @binding(1) var<storage, read_write> block_sums: array<u32>;
+@group(1) @binding(2) var<storage, read_write> particles : array<Particle>; // unused here. Plan to merge radix + radix_reorder into one file unless I consider it too verbose
 
 override WORKGROUP_COUNT: u32;
 override THREADS_PER_WORKGROUP: u32;
@@ -21,6 +37,18 @@ override CURRENT_BIT: u32;
 override ELEMENT_COUNT: u32;
 
 var<workgroup> s_prefix_sum: array<u32, 2 * (THREADS_PER_WORKGROUP + 1)>;
+
+/* utils */
+fn hashCoords(pos: vec2f) -> u32 {
+    // 10 minute physics hash, can replace with Z-order
+    let xi = i32(floor(pos.x / params.cellSize));
+    let yi = i32(floor(pos.y / params.cellSize));
+    // Believe you can arbitrarily xor these numbers * any set of arbitrarily large prime (or coprime) numbers
+    // Wonder if there's any analytical/non-empirical way to validate effectiveness against hash-collisions
+    let h = (xi * 92837111) ^ (yi * 689287499);
+    return u32(abs(h)) % params.numBins;
+}
+/* end utils */
 
 @compute @workgroup_size(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, 1)
 fn radix_sort(
@@ -33,7 +61,7 @@ fn radix_sort(
     let GID = WID + TID; // Global thread ID
 
     // Extract 2 bits from the input
-    let elm = select(input[GID], 0, GID >= ELEMENT_COUNT);
+    let elm = select(hashCoords(inputParticles[GID]), 0, GID >= ELEMENT_COUNT);
     let extract_bits: u32 = (elm >> CURRENT_BIT) & 0x3;
 
     var bit_prefix_sums = array<u32, 4>(0, 0, 0, 0);

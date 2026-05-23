@@ -16,7 +16,14 @@ struct Particle {
 };
 
 struct Params {
-    size : u32
+    size : u32,
+    // Below: unused (just for BG consistency)
+    rho0 : f32,
+    H: f32,         // kernel smoothing radius
+    dt: f32,        // TODO: instead of hardcoding this, maybe expose this to CFL conditions
+    solverIterations: u32,
+    cellSize: f32,
+    numBins: u32,
 }
 
 // tile caches

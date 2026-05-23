@@ -36,22 +36,16 @@ struct Params {
 @group(1) @binding(0) var<storage, read> assignments : array<i32>;
 
 // TODO: cleanup cost_matrix from BG
+@group(1) @binding(1) var<storage, read> cost_matrix : array<i32>;
 
-// group 2 - simulation state (hot loop) + target particle
-// TODO: migrate to target positions + figure out which BG this belongs in
-@group(2) @binding(0) var<storage, read> target_particles : array<Particle>; // not sure if should move to solver BG
+// group 2 - simulation state (hot loop)
 // main pbf simulation stuff
-// TODO: move positions + velocities to particles struct
-@group(2) @binding(0) var<storage, read_write> positions: array<vec2f>;
-@group(2) @binding(1) var<storage, read_write> velocities: array<vec2f>;
-
-// Not sure if these need to be binded
-@group(2) @binding(2) var<storage, read_write> lambdas: array<f32>;
-@group(2) @binding(3) var<storage, read_write> deltaPos: array<vec2f>;
-@group(2) @binding(4) var<storage, read_write> posStar: array<vec2f>;       // predicted positions
-@group(2) @binding(5) var<storage, read_write> binStart: array<i32>;
-@group(2) @binding(6) var<storage, read_write> binCount: array<atomic<u32>>;
-@group(2) @binding(7) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
+@group(2) @binding(0) var<storage, read_write> lambdas: array<f32>;
+@group(2) @binding(1) var<storage, read_write> deltaPos: array<vec2f>;
+@group(2) @binding(2) var<storage, read_write> posStar: array<vec2f>;       // predicted positions
+@group(2) @binding(3) var<storage, read_write> binStart: array<i32>;
+@group(2) @binding(4) var<storage, read_write> binCount: array<atomic<u32>>;
+@group(2) @binding(5) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
 
 /* utils */
 fn hashCoords(pos: vec2f) -> u32 {
@@ -85,7 +79,7 @@ fn computeMain(
     let pos  = posStar[idx];
 
     // Apply external forces
-    var vel = velocities[idx];
+    var vel = particles[idx].velocity;
     let targetIdx = assignments[idx];
     if (targetIdx >= 0 && targetIdx < i32(n)) {
         let targetPos = posStar[u32(targetIdx)];
@@ -231,10 +225,10 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Position correction + velocity update
     let newPos = posStar[idx] + deltaPos[idx];
-    positions[idx] = newPos;
+    particles[idx].position = newPos;
 
     let newVel = (newPos - pos) / dt;
-    velocities[idx] = newVel;
+    particles[idx].velocity = newVel;
 
     // XSPH viscosity
     let C: f32 = 0.01;
@@ -264,7 +258,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let dist = length(r);
                 if (dist > H || dist < 0.0001) {continue;}
 
-                let v_ij = velocities[jIdx] - velocities[idx];
+                let v_ij = particles[jIdx].velocity - particles[idx].velocity;
 
                 // gradient cubic spline kernel
                 let r = pos - neiPos;
@@ -303,7 +297,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let dist = length(r);
                 if (dist > H || dist < 0.0001) {continue;}
 
-                let v_ij = velocities[jIdx] - velocities[idx];
+                let v_ij = particles[jIdx].velocity - particles[idx].velocity;
 
                 // gradient cubic spline kernel
                 let r = pos - neiPos;
@@ -330,15 +324,15 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     } // end neighbor bin accumulation
     // viscosity velocity update
-    velocities[idx] += C * viscosity_sum;
+    particles[idx].velocity += C * viscosity_sum;
 
     // cross product with scalar on RHS here intuitively becomes 90 degrees CCW by right-hand-rule
     // perp vector: (-Ny, Nx)
     eta = eta / length(eta);
     let f_vorticity = eps * omega[idx] * vec2(-eta.y,eta.x);
 
-    velocity[idx] += dt * f_vorticity;
+    particles[idx].velocity += dt * f_vorticity;
 
     // euler step position
-    positions[idx] += velocity[idx] * dt;
+    particles[idx].position += velocity[idx] * dt;
 }
