@@ -11,7 +11,7 @@ const NUM_BINS : u32 = 50000u;
 
 struct Particle {
     position: vec2f,
-    velocity: vec2f, // TODO: consolidate velocity (rm binding)
+    velocity: vec2f,
     color: vec4f
 };
 
@@ -63,6 +63,7 @@ fn hashCoords(pos: vec2f) -> u32 {
 fn computeMain(
     @builtin(global_invocation_id) gid : vec3<u32>
     ) {
+    // this should be called first before solver run
     let idx = gid.x;
     let n = params.size;
 
@@ -76,7 +77,7 @@ fn computeMain(
     let invRho0 = 1.0 / rho0;
     let eps = 1e-8;
 
-    let pos  = posStar[idx];
+    let pos = posStar[idx];
 
     // Apply external forces
     var vel = particles[idx].velocity;
@@ -118,51 +119,53 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // 3x3 bin neighborhood search
     if (idx < n) { // Need this spaghetti because all invocations must hit workgroupBarrier or indefinitely hangs
-    for (var dx = -1; dx <= i32(1); dx++) {
-        for (var dy = -1; dy <= i32(1); dy++) {
-            // TODO: add support for local_invocation_id and modify control flow to not screw over workgroup barrier
-            let posPrime = vec2(pos.x+dx, pos.y+dy);
-            if (min(posPrime.x, posPrime.y) < 0 || max(posPrime.x, posPrime.y) >= params.numBins) {
-                // OOB, no clamp
-                continue;
-            }
-            let nb = hashCoords(posPrime);
-            let start = binStart[nb];
-            let cnt = atomicLoad(&binCount[nb]);
-
-            // iterate over neighbors
-            for (var j: u32 = 0u; j < cnt; j++) {
-                let jIdx = u32(start) + j;
-                if (jIdx == idx) {continue;}
-
-                let neiPos = posStar[jIdx];
-                let r = pos - neiPos;
-                let dist = length(r);
-
-                // avoid obvious 0
-                if (dist > H || dist < 0.0001) { continue; }
-                let q = dist / H;
-
-                // cubic spline kernel
-                if (q < 1.0) {
-                    w = 2.0/3.0 - q*q + 0.5 * q*q*q;
-                    dw = -3.0 * q + 2.25 * q*q;
-                } else if (q < 2.0) {
-                    w = 1.0/6.0 * pow(2.0-q, 3.0);
-                    dw = -0.75*pow(2.0-q,2.0);
+        for (var dx = -1; dx <= i32(1); dx++) {
+            for (var dy = -1; dy <= i32(1); dy++) {
+                // TODO: add support for local_invocation_id and modify control flow to not screw over workgroup barrier
+                let posPrime = vec2(pos.x+dx, pos.y+dy);
+                if (min(posPrime.x, posPrime.y) < 0 || max(posPrime.x, posPrime.y) >= params.numBins) {
+                    // OOB, no clamp
+                    continue;
                 }
+                let nb = hashCoords(posPrime);
+                let start = binStart[nb];
+                let cnt = atomicLoad(&binCount[nb]);
 
-                density += w;
+                // iterate over neighbors
+                for (var j: u32 = 0u; j < cnt; j++) {
+                    let jIdx = u32(start) + j;
+                    if (jIdx == idx) {continue;}
 
-                // gradient contribution for lambda
-                let grad = (dw / (H*dist)) * r;
-                gradSum += dot(grad, grad);
+                    let neiPos = posStar[jIdx];
+                    let r = pos - neiPos;
+                    let dist = length(r);
+
+                    // avoid obvious 0
+                    if (dist > H || dist < 0.0001) { continue; }
+                    let q = dist / H;
+                    var w: f32 = 0.0;
+                    var dw: f32 = 0.0;
+
+                    // cubic spline kernel
+                    if (q < 1.0) {
+                        w = 2.0/3.0 - q*q + 0.5 * q*q*q;
+                        dw = -3.0 * q + 2.25 * q*q;
+                    } else if (q < 2.0) {
+                        w = 1.0/6.0 * pow(2.0-q, 3.0);
+                        dw = -0.75*pow(2.0-q,2.0);
+                    }
+
+                    density += w;
+
+                    // gradient contribution for lambda
+                    let grad = (dw / (H*dist)) * r;
+                    gradSum += dot(grad, grad);
+                }
             }
-        }
-    } // end neighbor bin accumulation
-    let C = density * invRho0 - 1.0;
-    lambdas[idx] = -C / (gradSum + eps);
-}
+        } // end neighbor bin accumulation
+        let C = density * invRho0 - 1.0;
+        lambdas[idx] = -C / (gradSum + eps);
+    }
 
     // Sync to ensure all lambdas are calculated
     workgroupBarrier();
@@ -225,7 +228,6 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Position correction + velocity update
     let newPos = posStar[idx] + deltaPos[idx];
-    particles[idx].position = newPos;
 
     let newVel = (newPos - pos) / dt;
     particles[idx].velocity = newVel;
@@ -247,7 +249,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let nb = hashCoords(posPrime);
             let start = binStart[nb];
-            let cnt = atomicLoad(&binCout[nb]);
+            let cnt = atomicLoad(&binCount[nb]);
 
             for (var j: u32 = 0u; j < cnt; j++) {
                 let jIdx = u32(start) + j;
@@ -266,7 +268,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (dist > H || dist < 0.0001) {continue;}
 
                 let q = dist/H;
-                let dW: f32 = 0;
+                var dw: f32 = 0;
 
                 if (q < 1) {
                     dw = -3 * q + 2.25 * q*q;
@@ -284,7 +286,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // XSPH viscosity in same loop
                 viscosity_sum += v_ij * grad;
             } // end neighbor search
-            omega[jIdx] = omega_i;
+            omega[idx] = omega_i;
 
             // another loop for vorticity
 
@@ -304,8 +306,8 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let dist = length(r);
                 if (dist > H || dist < 0.0001) {continue;}
 
-                let q = dist/H;
-                let dw: f32 = 0;
+                var q = dist/H;
+                var dw: f32 = 0;
 
                 if (q < 1.0) {
                     dw = -3 * q + 2.25 * q*q;
@@ -319,7 +321,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let grad = scale * r;
 
                 // since in 2D, we modify the math a little
-                eta += ((abs(omega[idx]) - abs(omega[jIdx])) / (rho[jIdx] + eps)) * grad;
+                eta += ((abs(omega[idx]) - abs(omega[jIdx])) / (density + eps)) * grad;
             } // end neighbor search for bin
         }
     } // end neighbor bin accumulation
@@ -334,5 +336,5 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     particles[idx].velocity += dt * f_vorticity;
 
     // euler step position
-    particles[idx].position += velocity[idx] * dt;
+    particles[idx].position += particles[idx].velocity * dt;
 }

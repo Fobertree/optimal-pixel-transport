@@ -65,34 +65,38 @@ fn auctionBiddingPhase(
         // already assigned. Skip
         return;
     }
-
     var best_profit : i32 = -INT_MAX;
     var best_col : i32 = -1;
     var second_best : i32 = -INT_MAX;
 
+    // if assignments[row] == -1, then it is unassigned
     for (var tileStart = 0u; tileStart < size; tileStart += TILE_SIZE) {
         // load tile of (cost - price) and column index
-        let col = tileStart + tid;
-        if (col < size) {
-            let profit = cost(row, col) - prices[col];
-            tileA[tid] = profit;
-            tileB[tid] = i32(col);
-        } else {
-            tileA[tid] = -INT_MAX;
-            tileB[tid] = -1;
+        if (assignments[row] == -1) {
+            let col = tileStart + tid;
+            if (col < size) {
+                let profit = cost(row, col) - prices[col];
+                tileA[tid] = profit;
+                tileB[tid] = i32(col);
+            } else {
+                tileA[tid] = -INT_MAX;
+                tileB[tid] = -1;
+            }
         }
 
         workgroupBarrier();
 
-        // local parallel reduction for max + argmax + second max
-        for (var k = 0u; k < TILE_SIZE; k++) {
-            let p = tileA[k];
-            if (p > best_profit) {
-                second_best = best_profit;
-                best_profit = p;
-                best_col = tileB[k];
-            } else if (p > second_best) {
-                second_best = p;
+        if (assignments[row] == -1) {
+            // local parallel reduction for max + argmax + second max
+            for (var k = 0u; k < TILE_SIZE; k++) {
+                let p = tileA[k];
+                if (p > best_profit) {
+                    second_best = best_profit;
+                    best_profit = p;
+                    best_col = tileB[k];
+                } else if (p > second_best) {
+                    second_best = p;
+                }
             }
         }
 
