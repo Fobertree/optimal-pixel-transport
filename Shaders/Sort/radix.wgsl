@@ -27,7 +27,11 @@ struct Params {
 // Radix BG
 @group(1) @binding(0) var<storage, read_write> local_prefix_sums: array<u32>; // sort hashes
 @group(1) @binding(1) var<storage, read_write> block_sums: array<u32>;
+// TODO: rm outputParticles buffer from radix BG, then swap particle buffer on global param bg every iteration
 @group(1) @binding(2) var<storage, read_write> particles : array<Particle>; // unused here. Plan to merge radix + radix_reorder into one file unless I consider it too verbose
+@group(0) @binding(3) var<storage, read_write> binStart: array<u32>;
+@group(0) @binding(4) var<storage, read_write> binEnd: array<u32>;
+@group(0) @binding(5) var<storage, read_write> outputHashes: array<u32>;
 
 override WORKGROUP_COUNT: u32;
 override THREADS_PER_WORKGROUP: u32;

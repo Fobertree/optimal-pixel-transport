@@ -26,7 +26,7 @@ struct Params {
     numBins: u32,
 }
 
-// TODO: update BG grouping
+// TODO: consider rebinding particles each iter on particles as psuedo buffer-swap
 
 // group 0 - params
 @group(0) @binding(0) var<storage, read_write> particles : array<Particle>;
@@ -42,9 +42,9 @@ struct Params {
 // main pbf simulation stuff
 @group(2) @binding(0) var<storage, read_write> lambdas: array<f32>;
 @group(2) @binding(1) var<storage, read_write> deltaPos: array<vec2f>;
-@group(2) @binding(2) var<storage, read_write> posStar: array<vec2f>;       // predicted positions
-@group(2) @binding(3) var<storage, read_write> binStart: array<i32>;
-@group(2) @binding(4) var<storage, read_write> binCount: array<atomic<u32>>;
+@group(2) @binding(2) var<storage, read_write> posStar: array<vec2f>;           // predicted positions
+@group(2) @binding(3) var<storage, read> binStart: array<i32>;
+@group(2) @binding(4) var<storage, read> binEnd: array<atomic<u32>>;
 @group(2) @binding(5) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
 
 /* utils */
@@ -60,24 +60,19 @@ fn hashCoords(pos: vec2f) -> u32 {
 /* end utils */
 
 @compute @workgroup_size(TILE_SIZE)
-fn computeMain(
-    @builtin(global_invocation_id) gid : vec3<u32>
-    ) {
-    // this should be called first before solver run
+fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     let n = params.size;
-
-    if (idx >= n) {
-        return;
-    }
 
     let dt = params.dt;
     let H = params.H;
     let rho0 = params.rho0;
     let invRho0 = 1.0 / rho0;
     let eps = 1e-8;
+    let cellSize = params.cellSize;
 
     let pos = posStar[idx];
+    let bin = hashCoords(pos);
 
     // Apply external forces
     var vel = particles[idx].velocity;
@@ -94,25 +89,6 @@ fn computeMain(
 
     posStar[idx] = pos + vel * dt;
 
-    // Counting pass
-    // NOTE: this logic relies on particles being already sorted by bin hash
-    let bin = hashCoords(posStar[idx]);
-    atomicAdd(&binCount[bin], 1u);
-}
-
-@compute @workgroup_size(TILE_SIZE)
-fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
-    let n = params.size;
-
-    let H = params.H;
-    let rho0 = params.rho0;
-    let invRho0 = 1.0 / rho0;
-    let eps = 1e-8;
-
-    let pos = posStar[idx];
-    let bin = hashCoords(pos);
-
     // calc density + lambda
     var density: f32 = 0.0;
     var gradSum: f32 = 0.0;             // lambda denominator
@@ -122,18 +98,17 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var dx = -1; dx <= i32(1); dx++) {
             for (var dy = -1; dy <= i32(1); dy++) {
                 // TODO: add support for local_invocation_id and modify control flow to not screw over workgroup barrier
-                let posPrime = vec2(pos.x+dx, pos.y+dy);
-                if (min(posPrime.x, posPrime.y) < 0 || max(posPrime.x, posPrime.y) >= params.numBins) {
+                let posPrime = vec2(pos.x+dx*cellSize, pos.y+dy*cellSize);
+                if (min(posPrime.x, posPrime.y) < -1 || max(posPrime.x, posPrime.y) > 1) {
                     // OOB, no clamp
                     continue;
                 }
                 let nb = hashCoords(posPrime);
                 let start = binStart[nb];
-                let cnt = atomicLoad(&binCount[nb]);
+                let end = binEnd[nb];
 
                 // iterate over neighbors
-                for (var j: u32 = 0u; j < cnt; j++) {
-                    let jIdx = u32(start) + j;
+                for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
                     if (jIdx == idx) {continue;}
 
                     let neiPos = posStar[jIdx];
@@ -178,17 +153,16 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var dx: i32 = -1; dx <= 1; dx++) {
         for (var dy: i32 = -1; dy <= 1; dy++) {
-            let posPrime = vec2(pos.x+dx, pos.y+dy);
-            if (min(posPrime.x, posPrime.y) < 0 || max(posPrime.x, posPrime.y) >= params.numBins) {
+            let posPrime = vec2(pos.x+dx*cellSize, pos.y+dy*cellSize);
+            if (min(posPrime.x, posPrime.y) < -1 || max(posPrime.x, posPrime.y) > 1) {
                 // OOB, no clamp
                 continue;
             }
             let nb = hashCoords(posPrime);
             let start = binStart[nb];
-            let cnt = atomicLoad(&binCount[nb]);
+            let end = binEnd[nb];
 
-            for (var j: u32 = 0u; j < cnt; j++) {
-                let jIdx = u32(start) + j;
+            for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
                 if (jIdx == idx) {continue;}
 
                 let neiPos = posStar[jIdx];
@@ -212,7 +186,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let grad = (dw / (H * dist)) * r;
                 let lambda_j = lambdas[jIdx];
 
-                // Tensile insability correction
+                // Tensile instability correction
                 let k = 0.1;
                 let delta_q = 0.2 * H;
                 let n = 4.0;
@@ -224,12 +198,15 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     } // end neighbor bin accumulation
 
+    // calculate delta pos
     deltaPos[idx] = dPos * invRho0;
 
-    // Position correction + velocity update
-    let newPos = posStar[idx] + deltaPos[idx];
+    // skip collision detection + response - no solids
 
-    let newVel = (newPos - pos) / dt;
+    // Position correction + velocity update
+    posStar[idx] = posStar[idx] + deltaPos[idx];
+
+    let newVel = (posStar[idx] - pos) / dt;
     particles[idx].velocity = newVel;
 
     // XSPH viscosity
@@ -242,8 +219,8 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var dx: i32 = -1; dx <= 1; dx++) {
         for (var dy: i32 = -1; dy <= 1; dy++) {
-            let posPrime = vec2(pos.x+dx, pos.y+dy);
-            if (min(posPrime.x, posPrime.y) < 0 || max(posPrime.x, posPrime.y) >= params.numBins) {
+            let posPrime = vec2(pos.x+dx*cellSize, pos.y+dy*cellSize);
+            if (min(posPrime.x, posPrime.y) < -1 || max(posPrime.x, posPrime.y) > 1) {
                 // OOB, no clamp
                 continue;
             }
@@ -263,9 +240,6 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let v_ij = particles[jIdx].velocity - particles[idx].velocity;
 
                 // gradient cubic spline kernel
-                let r = pos - neiPos;
-                let dist = length(r);
-                if (dist > H || dist < 0.0001) {continue;}
 
                 let q = dist/H;
                 var dw: f32 = 0;
@@ -288,8 +262,10 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
             } // end neighbor search
             omega[idx] = omega_i;
 
-            // another loop for vorticity
+            // TODO: consider deconstruct workgroup barrier into separate compute shaders
+            // workgroupBarrier?
 
+            // another loop for vorticity
             for (var j: u32 = 0u; j < cnt; j++) {
                 let jIdx = u32(start) + j;
                 if (jIdx == idx) {continue;}
@@ -302,10 +278,6 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let v_ij = particles[jIdx].velocity - particles[idx].velocity;
 
                 // gradient cubic spline kernel
-                let r = pos - neiPos;
-                let dist = length(r);
-                if (dist > H || dist < 0.0001) {continue;}
-
                 var q = dist/H;
                 var dw: f32 = 0;
 
@@ -337,4 +309,5 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // euler step position
     particles[idx].position += particles[idx].velocity * dt;
+    posStar[idx] = particles[idx].position;
 }

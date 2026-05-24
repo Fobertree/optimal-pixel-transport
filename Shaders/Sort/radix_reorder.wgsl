@@ -1,14 +1,18 @@
 // Impl taken from: https://github.com/kishimisu/WebGPU-Radix-Sort/blob/main/src/shaders/radix_sort_reorder.js
 // https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda
 
-@group(0) @binding(0) var<storage, read> inputParticles: array<Particle>;
+@group(0) @binding(0) var<storage, read_write> inputParticles: array<Particle>;
 @group(0) @binding(1) var<storage, read> params : Params;
 
 @group(0) @binding(0) var<storage, read> local_prefix_sum: array<u32>;
 @group(0) @binding(1) var<storage, read> prefix_block_sum: array<u32>;
 // this is a tmp buffer in my case. I do an inefficient copy to the input buffer for ease of binding groups
 // will optimize this out later
+// TODO: rm outputParticles buffer from radix BG, then swap particle buffer on global param bg every iteration
 @group(0) @binding(2) var<storage, read_write> outputParticles: array<Particle>;
+@group(0) @binding(3) var<storage, read_write> binStart: array<u32>;
+@group(0) @binding(4) var<storage, read_write> binEnd: array<u32>;
+@group(0) @binding(5) var<storage, read_write> outputHashes: array<u32>;
 
 struct Params {
     // Below: unused (just for BG consistency)
@@ -51,9 +55,6 @@ fn radix_sort_reorder(
     let WID = WORKGROUP_ID * THREADS_PER_WORKGROUP;
     let GID = WID + TID; // Global thread ID
 
-    if (GID >= ELEMENT_COUNT) {
-        return;
-    }
     if (GID < ELEMENT_COUNT) {
         let k = hashCoords(inputParticles[GID]);
         let v = inputParticles[GID];
@@ -67,14 +68,43 @@ fn radix_sort_reorder(
         let sorted_position = prefix_block_sum[pid] + local_prefix;
 
         // TODO: modify outputParticles to workgroup tile cache if possible
+        // TODO: see if webgpu can support buffer swap logic like opengl
         outputParticles[sorted_position] = v;
     }
 
-    workgroupBarrier();
-
-    // TODO: direct copy to input buffer
     if (GID < ELEMENT_COUNT) {
         // NAIVE SLOPPY COPY CODE - will optimize later
         inputParticles[GID] = outputParticles[GID];
+        outputHashes[GID] = k;
+    }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, 1)
+fn radix_sort_reorder(
+    @builtin(workgroup_id) w_id: vec3<u32>,
+    @builtin(num_workgroups) w_dim: vec3<u32>,
+    @builtin(local_invocation_index) TID: u32, // Local thread ID
+) {
+    let WORKGROUP_ID = w_id.x + w_id.y * w_dim.x;
+    let WID = WORKGROUP_ID * THREADS_PER_WORKGROUP;
+    let GID = WID + TID; // Global thread ID
+
+    if (GID < ELEMENT_COUNT) {
+        // TODO: see if can swap buffers
+        // I think it's diff from opengl where best approach is to rebind between buffers A and B every iteration
+        inputParticles[GID] = outputParticles[GID];
+
+        let cur = hashes[GID];
+        let prev = hashes[GID-1];
+        let next = hashes[GID+1];
+
+        // thread-safe despite duplicate hashes - only one index where writes can occur in both cases
+        if (GID == 0 || cur != prev) {
+            binStart[cur] = GID;
+        }
+
+        if (GID == ELEMENT_COUNT-1 || cur != next) {
+            binEnd[cur] = GID+1;
+        }
     }
 }

@@ -39,12 +39,13 @@ wgpu::Buffer lambdasBuffer;
 wgpu::Buffer deltaPosBuffer;
 wgpu::Buffer posStarBuffer;
 wgpu::Buffer binStartBuffer;
-wgpu::Buffer binCountBuffer;
+wgpu::Buffer binEndBuffer;
 wgpu::Buffer omegaBuffer;
 // radix
 wgpu::Buffer localPrefixSumBuffer;
 wgpu::Buffer prefixBlockSumBuffer;
 wgpu::Buffer auxParticleSortBuffer; // naive auxiliary buffer since radix sort is not in-place, so copy back
+wgpu::Buffer outputHashBuffer;
 
 wgpu::ComputePipeline solverPipeline, physicsPipeline, radixPipeline;
 wgpu::RenderPipeline renderPipeline;
@@ -297,19 +298,19 @@ void CreateRenderPipeline() {
 
     binStartBuffer = device.CreateBuffer(&binStartBufferDesc);
 
-    // binCount
-    wgpu::BufferDescriptor binCountBufferDesc{};
-    binCountBufferDesc.size = sz * sizeof(int);
-    binCountBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+    // binEnd
+    wgpu::BufferDescriptor binEndBufferDesc{};
+    binEndBufferDesc.size = sz * sizeof(int);
+    binEndBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
 
-    binCountBuffer = device.CreateBuffer(&binCountBufferDesc);
+    binEndBuffer = device.CreateBuffer(&binEndBufferDesc);
 
     // omegaBuffer
     wgpu::BufferDescriptor omegaBufferDesc{};
     omegaBufferDesc.size = sz * sizeof(int);
     omegaBufferDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
 
-    binCountBuffer = device.CreateBuffer(&omegaBufferDesc);
+    binEndBuffer = device.CreateBuffer(&omegaBufferDesc);
 
     /* Bind Group Layouts */
     // Group 0: Global Bind Group
@@ -374,7 +375,7 @@ void CreateRenderPipeline() {
     physicsEntries[3].visibility = wgpu::ShaderStage::Compute;
     physicsEntries[3].buffer.type = wgpu::BufferBindingType::Storage;
 
-    // binCount
+    // binEnd
     physicsEntries[4].binding = 4;
     physicsEntries[4].visibility = wgpu::ShaderStage::Compute;
     physicsEntries[4].buffer.type = wgpu::BufferBindingType::Storage;
@@ -391,7 +392,7 @@ void CreateRenderPipeline() {
     auto physicsBGL = device.CreateBindGroupLayout(&physicsLayoutDesc);
 
     // Group 4: Radix Sort
-    std::array<wgpu::BindGroupLayoutEntry, 3> radixEntries;
+    std::array<wgpu::BindGroupLayoutEntry, 4> radixEntries;
 
     // local prefix sum
     radixEntries[0].binding = 0;
@@ -403,11 +404,16 @@ void CreateRenderPipeline() {
     radixEntries[1].visibility = wgpu::ShaderStage::Compute;
     radixEntries[1].buffer.type = wgpu::BufferBindingType::Storage;
 
-    // output particles - tmp buffer for swap
+    // output particles - pseudo swap buffer
     // TODO: I don't like this binding - replace it with something better
     radixEntries[2].binding = 2;
     radixEntries[2].visibility = wgpu::ShaderStage::Compute;
     radixEntries[2].buffer.type = wgpu::BufferBindingType::Storage;
+
+    // output hashes (for bin start and bin end accumulation)
+    radixEntries[3].binding = 3;
+    radixEntries[3].visibility = wgpu::ShaderStage::Compute;
+    radixEntries[3].buffer.type = wgpu::BufferBindingType::Storage;
 
     wgpu::BindGroupLayoutDescriptor radixLayoutDesc{};
     radixLayoutDesc.entryCount = radixEntries.size();
@@ -511,7 +517,7 @@ void CreateRenderPipeline() {
     physicsBGEntries[3].buffer = binStartBuffer;
 
     physicsBGEntries[4].binding = 4;
-    physicsBGEntries[4].buffer = binCountBuffer;
+    physicsBGEntries[4].buffer = binEndBuffer;
 
     physicsBGEntries[5].binding = 5;
     physicsBGEntries[5].buffer = omegaBuffer;
@@ -524,7 +530,7 @@ void CreateRenderPipeline() {
     physicsBG = device.CreateBindGroup(&physicsBGDesc);
 
     // group 3 - radix group
-    std::array<wgpu::BindGroupEntry, 3> radixBGEntries;
+    std::array<wgpu::BindGroupEntry, 5> radixBGEntries;
 
     radixBGEntries[0].binding = 0;
     radixBGEntries[0].buffer = localPrefixSumBuffer;
@@ -534,6 +540,15 @@ void CreateRenderPipeline() {
 
     radixBGEntries[2].binding = 2;
     radixBGEntries[2].buffer = auxParticleSortBuffer;
+
+    radixBGEntries[3].binding = 3;
+    radixBGEntries[3].buffer = binStartBuffer;
+
+    radixBGEntries[4].binding = 4;
+    radixBGEntries[4].buffer = binEndBuffer;
+
+    radixBGEntries[5].binding = 5;
+    radixBGEntries[5].buffer = outputHashBuffer;
 
     wgpu::BindGroupDescriptor radixBGDesc{};
     radixBGDesc.layout = radixBGL;
@@ -615,11 +630,26 @@ void CreateRenderPipeline() {
             sz * sizeof(int)
     );
 
+    // TODO: rm this from radix BG, and treat this as a swap buffer
     queue.WriteBuffer(
             auxParticleSortBuffer,
             0,
             particleCPUData.data(),
             MAX_CPU_PARTICLES * sizeof(ParticleCPU)
+    );
+
+    queue.WriteBuffer(
+            binStartBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
+    );
+
+    queue.WriteBuffer(
+            binEndBuffer,
+            0,
+            std::vector<int>(sz, 0).data(),
+            sz * sizeof(int)
     );
 
     // physics
@@ -630,14 +660,12 @@ void CreateRenderPipeline() {
             sz * sizeof(int)
     );
 
-
     queue.WriteBuffer(
             deltaPosBuffer,
             0,
             std::vector<int>(sz, 0).data(),
             sz * sizeof(int)
     );
-
 
     queue.WriteBuffer(
             posStarBuffer,
@@ -646,7 +674,6 @@ void CreateRenderPipeline() {
             sz * sizeof(int)
     );
 
-
     queue.WriteBuffer(
             binStartBuffer,
             0,
@@ -654,9 +681,8 @@ void CreateRenderPipeline() {
             sz * sizeof(int)
     );
 
-
     queue.WriteBuffer(
-            binCountBuffer,
+            binEndBuffer,
             0,
             std::vector<int>(sz, 0).data(),
             sz * sizeof(int)
