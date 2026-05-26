@@ -10,6 +10,7 @@
 #include <iterator>
 #include <array>
 #include <memory>
+#include <ranges>
 
 #include "particle.h"
 #include "image.h"
@@ -89,6 +90,17 @@ public:
 
     [[nodiscard]] const std::vector<ParticleCPU> &getParticleCPUBuffer() const {
         return particleCPUBuffer_;
+    }
+
+    [[nodiscard]] const std::vector<TargetParticleCPU> getTargetParticleCPUBuffer() const {
+        size_t N = buf_.size();
+        std::vector<TargetParticleCPU> res;
+        res.reserve(N);
+        for (auto &particle: buf_) {
+            auto pos = particle->getPos();
+            res.emplace_back(pos);
+        }
+        return res;
     }
 
     // don't need to pop particles for out use-case

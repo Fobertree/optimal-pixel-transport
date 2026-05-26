@@ -12,8 +12,15 @@ const NUM_BINS : u32 = 50000u;
 struct Particle {
     position: vec2f,
     velocity: vec2f,
-    color: vec4f
+    color: vec4f,
+    // TODO: this is fine for now, but optimization may be to move these back out
+    targetPos: vec2f,
+    assigned: bool,
 };
+
+struct TargetPos {
+    position: vec2f
+}
 
 // minimal redundancy overhead
 struct Params {
@@ -32,22 +39,20 @@ struct Params {
 @group(0) @binding(0) var<storage, read_write> particles : array<Particle>;
 @group(0) @binding(1) var<storage, read> params : Params;
 
-// group 1 - solver (assignments, costs)
-@group(1) @binding(0) var<storage, read> assignments : array<i32>;
-
-// TODO: cleanup cost_matrix from BG
-@group(1) @binding(1) var<storage, read> cost_matrix : array<i32>;
-
-// group 2 - simulation state (hot loop)
+// group 1 - simulation state (hot loop)
 // main pbf simulation stuff
-@group(2) @binding(0) var<storage, read_write> lambdas: array<f32>;
-@group(2) @binding(1) var<storage, read_write> deltaPos: array<vec2f>;
-@group(2) @binding(2) var<storage, read_write> posStar: array<vec2f>;           // predicted positions
-@group(2) @binding(3) var<storage, read> binStart: array<i32>;
-@group(2) @binding(4) var<storage, read> binEnd: array<atomic<u32>>;
-@group(2) @binding(5) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
+@group(1) @binding(0) var<storage, read_write> lambdas: array<f32>;
+@group(1) @binding(1) var<storage, read_write> deltaPos: array<vec2f>;
+@group(1) @binding(2) var<storage, read_write> posStar: array<vec2f>;           // predicted positions
+@group(1) @binding(3) var<storage, read> binStart: array<i32>;
+@group(1) @binding(4) var<storage, read> binEnd: array<atomic<u32>>;
+@group(1) @binding(5) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
+// solver
+@group(1) @binding(6) var<storage, read> assignments: array<i32>;
+@group(1) @binding(7) var<storage, read> targetParticles : array<TargetPos>;    // constant, don't need to swap
 
 /* utils */
+// TODO: migrate to Morton code/Z-order
 fn hashCoords(pos: vec2f) -> u32 {
     // 10 minute physics hash, can replace with Z-order
     let xi = i32(floor(pos.x / params.cellSize));
@@ -58,9 +63,9 @@ fn hashCoords(pos: vec2f) -> u32 {
     return u32(abs(h)) % params.numBins;
 }
 /* end utils */
-
 @compute @workgroup_size(TILE_SIZE)
-fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn pbfExternalForces(@builtin(global_invocation_id) gid: vec3<u32>) {
+    // TODO: run this BEFORE radix sort
     let idx = gid.x;
     let n = params.size;
 
@@ -78,7 +83,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     var vel = particles[idx].velocity;
     let targetIdx = assignments[idx];
     if (targetIdx >= 0 && targetIdx < i32(n)) {
-        let targetPos = posStar[u32(targetIdx)];
+        let targetPos = targetParticles[u32(targetIdx)].position;
         let dir = targetPos - pos;
         let dist = length(dir);
         if (dist > 0.0001) {
@@ -88,6 +93,23 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     posStar[idx] = pos + vel * dt;
+}
+
+@compute @workgroup_size(TILE_SIZE)
+fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
+    // run after sort
+    let idx = gid.x;
+    let n = params.size;
+
+    let dt = params.dt;
+    let H = params.H;
+    let rho0 = params.rho0;
+    let invRho0 = 1.0 / rho0;
+    let eps = 1e-8;
+    let cellSize = params.cellSize;
+
+    let pos = posStar[idx];
+    let bin = hashCoords(pos);
 
     // calc density + lambda
     var density: f32 = 0.0;
@@ -142,7 +164,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
         lambdas[idx] = -C / (gradSum + eps);
     }
 
-    // Sync to ensure all lambdas are calculated
+    // TODO: workgroup barrier doesn't work here. Need to make a new @compute
     workgroupBarrier();
 
     if (idx >= n) {return;}
@@ -262,8 +284,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
             } // end neighbor search
             omega[idx] = omega_i;
 
-            // TODO: consider deconstruct workgroup barrier into separate compute shaders
-            // workgroupBarrier?
+            // TODO: separate into new @compute
 
             // another loop for vorticity
             for (var j: u32 = 0u; j < cnt; j++) {

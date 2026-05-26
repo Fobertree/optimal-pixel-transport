@@ -60,10 +60,21 @@ struct ParticleCPU {
     ParticleCPU(float x, float y, std::array<float, 4> color) : x(x), y(y), r(color[0]), g(color[1]), b(color[2]),
                                                                 a(color[3]) {};
     float x, y;
-    float pad[2]{}; // need padding for vec4f
-    // vec4f must start at a 16-byte aligned address
+    float vX, vY;
     float r{}, g{}, b{}, a{};
+    float targetX = 0, targetY = 0;
+    bool isAssigned{false};
+//    float pad[2]{}; // need padding for vec4f
+    // vec4f must start at a 16-byte aligned address
 //    float color[4];
+};
+
+struct TargetParticleCPU {
+    TargetParticleCPU(std::array<float, 2> pos) : x(pos[0]), y(pos[1]) {};
+
+    TargetParticleCPU(float x, float y) : x(x), y(y) {};
+
+    float x, y;
 };
 
 

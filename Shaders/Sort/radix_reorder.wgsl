@@ -4,15 +4,18 @@
 @group(0) @binding(0) var<storage, read_write> inputParticles: array<Particle>;
 @group(0) @binding(1) var<storage, read> params : Params;
 
-@group(0) @binding(0) var<storage, read> local_prefix_sum: array<u32>;
-@group(0) @binding(1) var<storage, read> prefix_block_sum: array<u32>;
+@group(1) @binding(0) var<storage, read> local_prefix_sum: array<u32>;
+@group(1) @binding(1) var<storage, read> prefix_block_sum: array<u32>;
 // this is a tmp buffer in my case. I do an inefficient copy to the input buffer for ease of binding groups
 // will optimize this out later
 // TODO: rm outputParticles buffer from radix BG, then swap particle buffer on global param bg every iteration
-@group(0) @binding(2) var<storage, read_write> outputParticles: array<Particle>;
-@group(0) @binding(3) var<storage, read_write> binStart: array<u32>;
-@group(0) @binding(4) var<storage, read_write> binEnd: array<u32>;
-@group(0) @binding(5) var<storage, read_write> outputHashes: array<u32>;
+@group(1) @binding(2) var<storage, read_write> outputParticles: array<Particle>;
+@group(1) @binding(3) var<storage, read_write> binStart: array<u32>;
+@group(1) @binding(4) var<storage, read_write> binEnd: array<u32>;
+@group(1) @binding(5) var<storage, read_write> outputHashes: array<u32>;
+// additional buffers to preserve data with Jacobi auction solver
+@group(1) @binding(6) var<storage, read_write> input_bid_from_row: array<atomic<f32>>;
+@group(1) @binding(6) var<storage, read_write> output_bid_from_row: array<atomic<f32>>;
 
 struct Params {
     // Below: unused (just for BG consistency)
@@ -24,6 +27,14 @@ struct Params {
     cellSize: f32,
     numBins: u32,
 }
+
+struct Particle {
+    position: vec2f,
+    velocity: vec2f,
+    color: vec4f,
+    targetPos: vec2f,
+    assigned: bool,
+};
 
 override WORKGROUP_COUNT: u32;
 override THREADS_PER_WORKGROUP: u32;

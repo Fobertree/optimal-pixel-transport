@@ -55,6 +55,9 @@ public:
     [[nodiscard]] const std::vector<ParticleCPU> &
     getParticleCPUBuffer() const { return src_buf_.getParticleCPUBuffer(); }
 
+    [[nodiscard]] const std::vector<TargetParticleCPU> &
+    getTargetParticleCPUBuffer() const { return target_buf_.getTargetParticleCPUBuffer(); }
+
 protected:
     // declare pure virtual functions
     // Call solver first to accumulate impulse, then call ParticleBuffer::iterate

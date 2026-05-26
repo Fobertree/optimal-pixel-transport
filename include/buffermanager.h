@@ -74,21 +74,39 @@ public:
 
     template<typename... Buffers>
 //    requires (std::same_as<std::remove_cv_t<Buffers>, wgpu::Buffer> && ...)
-    std::vector<wgpu::BindGroupEntry> getBGEntries(Buffers &... args) {
+    [[nodiscard]] std::vector<wgpu::BindGroupEntry> getBGEntries(Buffers &... args) {
         // using vector over array since array would require auto return type
         // can also sizeof...(args)
         const size_t N = sizeof...(args);
         // assume this is cheap enough?
         // worst-case, only particles need to be re-binded (buffer swap) so this should be fine
-        std::array<wgpu::Buffer, N> list = {args...};
+        const std::array<const wgpu::Buffer, N> list = {args...};
         std::vector<wgpu::BindGroupEntry> bgEntries(N);
 
+        // C++23 has std enumerate
         for (size_t i = 0; i < N; i++) {
             bgEntries[i].binding = i;
             bgEntries[i].buffer = list[i];
         }
 
         return bgEntries;
+    }
+
+    template<typename... BindingType>
+    [[nodiscard]] std::vector<wgpu::BindGroupLayoutEntry>
+    getBGLayoutEntries(wgpu::ShaderStage shaderStage, BindingType &... args) {
+        const size_t N = sizeof...(args);
+        const std::array<wgpu::BufferBindingType, N> list = {args...};
+        std::vector<wgpu::BindGroupLayoutEntry> bgLayoutEntries(N);
+
+        for (size_t i = 0; i < N; i++) {
+            bgLayoutEntries[i] = {
+                    .binding = 0,
+                    .visibility = shaderStage,
+                    .buffer = {.type = list[i]}
+            };
+        }
+        return bgLayoutEntries;
     }
 
 private:

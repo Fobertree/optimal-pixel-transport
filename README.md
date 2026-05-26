@@ -23,3 +23,5 @@ Emcc toolchain
 - Explore migration to particle-based fluid sim
 - Absurdly dense cost matrix. Wonder if there's some way/transformation to induce sparsity without ruining results
 - PBF and physics as Compute Shader
+
+AoS and SoA

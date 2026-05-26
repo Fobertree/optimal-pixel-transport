@@ -8,11 +8,14 @@ const INT_MAX : i32 = 2147483647;
 const TILE_SIZE : u32 = 256u;
 const MAX_SIZE : u32 = 25000; // 500^2
 // no guaranteed optimality but in practice this should be good (don't want to convert everything to float for slower calc)
-const EPSILON : f32 = 1; // TODO: migrate to params
+const EPSILON : f32 = 1; // TODO: migrate to params + iteratively shrink EPSILON (or just set it < 1/n)
 
 struct Particle {
     position: vec2f,
-    color: vec4f
+    velocity: vec2f,
+    color: vec4f,
+    targetPos: vec2f,
+    assigned: bool,
 };
 
 struct Params {
@@ -35,15 +38,16 @@ var<workgroup> tileB: array<i32, TILE_SIZE>;     // column indices for argmax
 @group(0) @binding(1) var<storage, read> params : Params;
 
 // group 1 - solver (assignments + cost_matrix)
+// TODO: this gets scrambled by radix binsort in PBF simulation
 @group(1) @binding(0) var<storage, read_write> assignments : array<i32>; // row → col (-1 = unassigned)
 
 // Pre-computed on CPU
 @group(1) @binding(1) var<storage, read> cost_matrix : array<i32>;
 
 // Auction-specific buffers (all size MAX_SIZE)
-@group(1) @binding(2) var<storage, read_write> prices : array<i32, MAX_SIZE>;           // column prices, init to 0 on CPU
-@group(1) @binding(3) var<storage, read_write> bid_value : array<atomic<i32>, MAX_SIZE>; // highest bid per column this round
-@group(1) @binding(4) var<storage, read_write> bid_from_row : array<atomic<i32>, MAX_SIZE>; // who placed the highest bid
+@group(1) @binding(2) var<storage, read_write> prices : array<f32, MAX_SIZE>;           // column prices, init to 0 on CPU
+@group(1) @binding(3) var<storage, read_write> bid_value : array<atomic<f32>, MAX_SIZE>; // highest bid per column this round
+@group(1) @binding(4) var<storage, read_write> bid_from_row : array<atomic<f32>, MAX_SIZE>; // who placed the highest bid
 
 var<workgroup> match_count : atomic<i32>;
 
@@ -103,7 +107,7 @@ fn auctionBiddingPhase(
         workgroupBarrier();
     }
 
-    let bid_amount = best_profit - second_best + EPSILON;
+    let bid_amount: f32 = best_profit - second_best + EPSILON;
 
     // submit bid to best column w/ atomics
     if (best_col != -1) {
@@ -143,7 +147,7 @@ fn auctionUpdatePhase(
 
         if (col < size) {
             highest_bid = atomicLoad(&bid_value[col]);
-             bidder_row = atomicLoad(&bid_from_row[col]);
+            bidder_row = atomicLoad(&bid_from_row[col]);
         }
 
         workgroupBarrier();
@@ -179,21 +183,6 @@ fn auctionUpdatePhase(
 
         workgroupBarrier();
     }
-}
-
-// run auction iteration
-@compute @workgroup_size(TILE_SIZE)
-fn auctionMain(
-    @builtin(local_invocation_id) local_id: vec3<u32>,
-    @builtin(workgroup_id) workgroup_id: vecc3<u32>
-) {
-    // Phase 1: bidding
-    auctionBiddingPhase(local_id, workgroup_id);
-
-    workgroupBarrier();
-
-    // Phase 2: update
-    auctionUpdatePhase(local_id, workgroup_id);
 }
 
 @compute @workgroup_size(TILE_SIZE)

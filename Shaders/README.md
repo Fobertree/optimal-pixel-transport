@@ -60,3 +60,8 @@ wgpu::Buffer omegaBuffer;
 wgpu::Buffer localPrefixSumBuffer;
 wgpu::Buffer prefixBlockSumBuffer;
 wgpu::Buffer auxParticleSortBuffer; // naive auxiliary buffer since radix sort is not in-place, so copy back
+
+Next steps:
+
+- Particle swap buffer
+- fragment shader? (current one should work fine, not sure if should try point splatting/voronoi splatting)
