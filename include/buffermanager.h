@@ -33,11 +33,9 @@ struct BGLParams {
  */
 class BufferManager {
 public:
-    explicit BufferManager(wgpu::Device &device, wgpu::Queue &queue, wgpu::Buffer &bufA, wgpu::Buffer &bufB)
+    explicit BufferManager(wgpu::Device &device, wgpu::Queue &queue)
             : device_(device),
-              queue_(queue),
-              particleBufA_(bufA),
-              particleBufB_(bufB) {
+              queue_(queue) {
 
     }
 
@@ -73,12 +71,10 @@ public:
     }
 
     template<typename... Buffers>
-//    requires (std::same_as<std::remove_cv_t<Buffers>, wgpu::Buffer> && ...)
     [[nodiscard]] std::vector<wgpu::BindGroupEntry> getBGEntries(Buffers &... args) {
         // using vector over array since array would require auto return type
-        // can also sizeof...(args)
         const size_t N = sizeof...(args);
-        // assume this is cheap enough?
+        // assume this unpacks lvalue ref, but not 100% sure
         // worst-case, only particles need to be re-binded (buffer swap) so this should be fine
         const std::array<const wgpu::Buffer, N> list = {args...};
         std::vector<wgpu::BindGroupEntry> bgEntries(N);
@@ -110,14 +106,6 @@ public:
     }
 
 private:
-    void swapParticleBuffer(); // TODO: impl
-
-    // might be arguably stupid to have the buffers with ambiguous ownership and just passing by ref
-    // maybe just define them here, not in main.cpp
-    wgpu::Buffer particleBufA_;
-    wgpu::Buffer particleBufB_;
-    bool particleSwapBufFlag_{false};
-
     // debatable whether it's good to have this as private member
     // opting into this bc I don't want to supply an arg everytime
     wgpu::Device device_;

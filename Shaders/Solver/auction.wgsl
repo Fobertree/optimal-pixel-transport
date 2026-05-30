@@ -13,9 +13,7 @@ const EPSILON : f32 = 1; // TODO: migrate to params + iteratively shrink EPSILON
 struct Particle {
     position: vec2f,
     velocity: vec2f,
-    color: vec4f,
-    targetPos: vec2f,
-    assigned: bool,
+    color: vec4f
 };
 
 struct Params {
@@ -38,7 +36,6 @@ var<workgroup> tileB: array<i32, TILE_SIZE>;     // column indices for argmax
 @group(0) @binding(1) var<storage, read> params : Params;
 
 // group 1 - solver (assignments + cost_matrix)
-// TODO: this gets scrambled by radix binsort in PBF simulation
 @group(1) @binding(0) var<storage, read_write> assignments : array<i32>; // row → col (-1 = unassigned)
 
 // Pre-computed on CPU
@@ -48,6 +45,7 @@ var<workgroup> tileB: array<i32, TILE_SIZE>;     // column indices for argmax
 @group(1) @binding(2) var<storage, read_write> prices : array<f32, MAX_SIZE>;           // column prices, init to 0 on CPU
 @group(1) @binding(3) var<storage, read_write> bid_value : array<atomic<f32>, MAX_SIZE>; // highest bid per column this round
 @group(1) @binding(4) var<storage, read_write> bid_from_row : array<atomic<f32>, MAX_SIZE>; // who placed the highest bid
+// shouldn't need the indices here
 
 var<workgroup> match_count : atomic<i32>;
 

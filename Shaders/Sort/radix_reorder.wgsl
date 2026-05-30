@@ -9,13 +9,12 @@
 // this is a tmp buffer in my case. I do an inefficient copy to the input buffer for ease of binding groups
 // will optimize this out later
 // TODO: rm outputParticles buffer from radix BG, then swap particle buffer on global param bg every iteration
-@group(1) @binding(2) var<storage, read_write> outputParticles: array<Particle>;
-@group(1) @binding(3) var<storage, read_write> binStart: array<u32>;
-@group(1) @binding(4) var<storage, read_write> binEnd: array<u32>;
-@group(1) @binding(5) var<storage, read_write> outputHashes: array<u32>;
-// additional buffers to preserve data with Jacobi auction solver
-@group(1) @binding(6) var<storage, read_write> input_bid_from_row: array<atomic<f32>>;
-@group(1) @binding(6) var<storage, read_write> output_bid_from_row: array<atomic<f32>>;
+@group(1) @binding(2) var<storage, read_write> binStart: array<u32>;
+@group(1) @binding(3) var<storage, read_write> binEnd: array<u32>;
+// outputs
+@group(1) @binding(4) var<storage, read_write> outputHashes: array<u32>;
+// argsort because it's a PITA to manage a ton of swap buffers and all the assignments might lead to even worse performance than lost cache locality
+@group(1) @binding(5) var<storage, read_write> sortIndices: array<u32>;
 
 struct Params {
     // Below: unused (just for BG consistency)
@@ -31,9 +30,7 @@ struct Params {
 struct Particle {
     position: vec2f,
     velocity: vec2f,
-    color: vec4f,
-    targetPos: vec2f,
-    assigned: bool,
+    color: vec4f
 };
 
 override WORKGROUP_COUNT: u32;
@@ -67,8 +64,8 @@ fn radix_sort_reorder(
     let GID = WID + TID; // Global thread ID
 
     if (GID < ELEMENT_COUNT) {
-        let k = hashCoords(inputParticles[GID]);
-        let v = inputParticles[GID];
+        let k = hashCoords(particles[GID]);
+        let v = particles[GID];
 
         let local_prefix = local_prefix_sum[GID];
 
@@ -78,9 +75,8 @@ fn radix_sort_reorder(
         // true prefix sum = local_prefix + prefix block sum
         let sorted_position = prefix_block_sum[pid] + local_prefix;
 
-        // TODO: modify outputParticles to workgroup tile cache if possible
-        // TODO: see if webgpu can support buffer swap logic like opengl
-        outputParticles[sorted_position] = v;
+        // sorted index => particle index
+        sortedIndices[sorted_position] = GID;
     }
 
     if (GID < ELEMENT_COUNT) {
@@ -101,13 +97,10 @@ fn radix_sort_reorder(
     let GID = WID + TID; // Global thread ID
 
     if (GID < ELEMENT_COUNT) {
-        // TODO: see if can swap buffers
-        // I think it's diff from opengl where best approach is to rebind between buffers A and B every iteration
-        inputParticles[GID] = outputParticles[GID];
-
         let cur = hashes[GID];
-        let prev = hashes[GID-1];
-        let next = hashes[GID+1];
+        // TODO: select
+        let prev = select(-1, hashes[GID-1], GID > 0);
+        let next = select(-1, hashes[GID+1], GID < ELEMENT_COUNT-1);
 
         // thread-safe despite duplicate hashes - only one index where writes can occur in both cases
         if (GID == 0 || cur != prev) {

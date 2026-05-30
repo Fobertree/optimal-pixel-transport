@@ -6,9 +6,7 @@
 struct Particle {
     position: vec2f,
     velocity: vec2f,
-    color: vec4f,
-    targetPos: vec2f,
-    assigned: bool,
+    color: vec4f
 };
 
 struct Params {
@@ -29,13 +27,12 @@ struct Params {
 // Radix BG
 @group(1) @binding(0) var<storage, read_write> local_prefix_sums: array<u32>; // sort hashes
 @group(1) @binding(1) var<storage, read_write> block_sums: array<u32>;
-@group(1) @binding(2) var<storage, read_write> particles : array<Particle>; // unused here - swap buffer w/ inputParticles
-@group(1) @binding(3) var<storage, read_write> binStart: array<u32>;
-@group(1) @binding(4) var<storage, read_write> binEnd: array<u32>;
-@group(1) @binding(5) var<storage, read_write> outputHashes: array<u32>;
-// additional buffers to preserve data with Jacobi auction solver
-@group(1) @binding(6) var<storage, read_write> input_bid_from_row: array<atomic<f32>>;
-@group(1) @binding(6) var<storage, read_write> output_bid_from_row: array<atomic<f32>>;
+@group(1) @binding(2) var<storage, read_write> binStart: array<u32>;
+@group(1) @binding(3) var<storage, read_write> binEnd: array<u32>;
+// outputs
+@group(1) @binding(4) var<storage, read_write> outputHashes: array<u32>;
+// argsort because it's a PITA to manage a ton of swap buffers and all the assignments might lead to even worse performance than lost cache locality
+@group(1) @binding(5) var<storage, read_write> sortIndices: array<u32>;
 
 override WORKGROUP_COUNT: u32;
 override THREADS_PER_WORKGROUP: u32;
@@ -133,8 +130,5 @@ fn radix_sort(
     if (GID < ELEMENT_COUNT) {
         // Store local prefix sum to global memory
         local_prefix_sums[GID] = bit_prefix_sums[extract_bits];
-        // unfortunately need atomic here
-        let val = atomicLoad(&input_bid_from_row[extract_bits]);
-        atomicStore(&output_bid_from_row[GID], val);
     }
 }
