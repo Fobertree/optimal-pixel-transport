@@ -60,6 +60,17 @@ public:
     }
 
     template<std::integral T = int>
+    void fillVal(wgpu::Buffer &buf, size_t N, T val) {
+        // this should probably be outside class in a namespace
+        queue_.WriteBuffer(
+                buf,
+                0,
+                std::vector<T>(N, val).data(),
+                N * sizeof(T)
+        );
+    }
+
+    template<std::integral T = int>
     void fillZero(wgpu::Buffer &buf, size_t N) {
         // this should probably be outside class in a namespace
         queue_.WriteBuffer(

@@ -541,6 +541,10 @@ void CreateRenderPipeline() {
             cost_buffer.size() * sizeof(COST_ITEM_T)
     );
 
+    bufferManager.fillZero(pricesBuffer, NUM_PARTICLES);
+    bufferManager.fillZero(bidValueBuffer, NUM_PARTICLES);
+    bufferManager.fillVal(bidFromRowBuffer, NUM_PARTICLES, -1);
+
     std::vector<int> indices(NUM_PARTICLES);
     std::iota(indices.begin(), indices.end(), 0);
     queue.WriteBuffer(
@@ -554,9 +558,9 @@ void CreateRenderPipeline() {
     // radix
     bufferManager.fillZero(localPrefixSumBuffer, NUM_PARTICLES);
     bufferManager.fillZero(prefixBlockSumBuffer, NUM_PARTICLES);
-
     bufferManager.fillZero(binStartBuffer, NUM_PARTICLES);
     bufferManager.fillZero(binEndBuffer, NUM_PARTICLES);
+    bufferManager.fillZero(outputHashBuffer, NUM_PARTICLES);
 
     // physics
     bufferManager.fillZero(lambdasBuffer, NUM_PARTICLES);
@@ -570,6 +574,13 @@ void CreateRenderPipeline() {
             0,
             targetParticleCPUData.data(),
             NUM_PARTICLES * sizeof(ParticleCPU)
+    );
+
+    queue.WriteBuffer(
+            sortIndicesBuffer,
+            0,
+            indices.data(),
+            NUM_PARTICLES * sizeof(int)
     );
 }
 
