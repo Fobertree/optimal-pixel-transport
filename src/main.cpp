@@ -3,7 +3,6 @@
 #include <GLFW/glfw3.h>
 
 #if defined(__EMSCRIPTEN__)
-#define WEBGPU_BACKEND_EMSCRIPTEN
 
 #include <emscripten/emscripten.h>
 
@@ -52,7 +51,9 @@ wgpu::Buffer localPrefixSumBuffer;
 wgpu::Buffer prefixBlockSumBuffer;
 wgpu::Buffer outputHashBuffer;
 
-wgpu::ComputePipeline solverPipeline, physicsPipeline, radixPipeline;
+wgpu::ComputePipeline solverBiddingPipeline, solverUpdatePipeline;
+wgpu::ComputePipeline radixSortPipeline, radixReorderPipeline;
+wgpu::ComputePipeline physicsExternalForcesPipeline, physicsSolverOnePipeline, physicsSolverTwoPipeline, physicsSolverThreePipeline;
 wgpu::RenderPipeline renderPipeline;
 
 wgpu::BindGroup globalBG, solverBG, physicsBG, radixBG;
@@ -65,23 +66,15 @@ SolverBase *solver;
 
 BufferManager bufferManager = BufferManager(device, queue);
 
-// TODO: populate
-std::string renderShaderCode;
-std::string physicsShaderCode;
-std::string solverShaderCode;
-
-std::string shaderCode = read_wgsl_file("particle_shader.wgsl");
-
 std::vector<uint16_t> indexData = {
         0, 1, 3,
         1, 2, 3
 };
 
-bool bufferSwapFlag{false};
-
 struct Params {
     uint32_t size;
     // C++ standard doesn't guarantee 32-bit float
+    // TODO: actually init the values
     float rho0;
     float H;
     float dt;
@@ -89,7 +82,6 @@ struct Params {
     float cellSize;
     uint32_t numBins;
 };
-
 
 uint16_t DIM, NUM_PARTICLES, NUM_PARTICLES_SQ;
 
@@ -122,17 +114,6 @@ void Start() {
         instance.ProcessEvents();
     }
 #endif
-}
-
-void InitParticles() {
-//    constexpr static COST_TYPE costType = COST_TYPE::RGB_DIST_HYBRID;
-    using DefaultSinkhorn = Sinkhorn<COST_TYPE::RGB_DIST_HYBRID>;
-    using DefaultLAPJV = LAPJV<int64_t>;
-    using DefaultHungarian = Hungarian<float>;
-    // Using integral types should be much better
-    using IntegralHungarian = Hungarian<int64_t, COST_TYPE::RGB_DIST_INT_HYBRID>;
-    solver = new IntegralHungarian("img_1.png", "img_6.png", 100, 100);
-    particleCPUData = solver->getParticleCPUBuffer();
 }
 
 void Init() {
@@ -198,35 +179,37 @@ void ConfigureSurface() {
 }
 
 void CreateRenderPipeline() {
-    // TODO: abstract this or reduce LOC bc lowkey unreadable
     using COST_ITEM_T = int;
 
     // cost buffer
-    auto src_buf = ParticleBuffer("img_1.png", DIM, DIM);
-    auto tar_buf = ParticleBuffer("img_6.png", DIM, DIM);
-    auto cost_buffer = get_cost_buffer<COST_TYPE::RGB_DIST_INT_HYBRID, COST_ITEM_T>(src_buf, tar_buf);
+    auto srcBuf = ParticleBuffer("img_1.png", DIM, DIM);
+    auto tarBuf = ParticleBuffer("img_6.png", DIM, DIM);
+
+    particleCPUData = srcBuf.getParticleCPUBuffer();
+    targetParticleCPUData = tarBuf.getTargetParticleCPUBuffer();
+
+    auto cost_buffer = get_cost_buffer<COST_TYPE::RGB_DIST_INT_HYBRID, COST_ITEM_T>(srcBuf, tarBuf);
 
     // params struct
     uint32_t sizeValue = DIM * DIM;
+    // TODO: init values
     Params params{.size = sizeValue};
 
     /* Load Shader Modules */
-    // TODO: read shader files after impl
+    // lambda capture only involves automatic storage objects, global variables do not need to be captured for access
+    auto getShaderModule = [](const std::string &shaderPath) {
+        std::string shaderCode = read_wgsl_file(shaderPath);
+        wgpu::ShaderSourceWGSL shaderSourceWgsl{{.code = shaderCode.c_str()}};
+        wgpu::ShaderModuleDescriptor shaderModuleDescriptor{.nextInChain = &shaderSourceWgsl};
+        return device.CreateShaderModule(&shaderModuleDescriptor);
+    };
 
-    // Solver shader
-    wgpu::ShaderSourceWGSL solverWgsl{{.code=solverShaderCode.c_str()}};
-    wgpu::ShaderModuleDescriptor solverShaderModuleDescriptor{.nextInChain = &solverWgsl};
-    wgpu::ShaderModule solverShaderModule = device.CreateShaderModule(&solverShaderModuleDescriptor);
-
-    // Physics shader
-    wgpu::ShaderSourceWGSL physicsWgsl{{.code=physicsShaderCode.c_str()}};
-    wgpu::ShaderModuleDescriptor physicsShaderModuleDescriptor{.nextInChain = &physicsWgsl};
-    wgpu::ShaderModule physicsShaderModule = device.CreateShaderModule(&physicsShaderModuleDescriptor);
-
-    // Render shader
-    wgpu::ShaderSourceWGSL renderWgsl{{.code=renderShaderCode.c_str()}};
-    wgpu::ShaderModuleDescriptor renderShaderModuleDescriptor{.nextInChain = &renderWgsl};
-    wgpu::ShaderModule renderShaderModule = device.CreateShaderModule(&renderShaderModuleDescriptor);
+    wgpu::ShaderModule solverShaderModule = getShaderModule("Solver/auction.wgsl");
+    wgpu::ShaderModule radixSortShaderModule = getShaderModule("Sort/radix.wgsl");
+    wgpu::ShaderModule radixReorderShaderModule = getShaderModule("Sort/radix_reorder.wgsl");
+    wgpu::ShaderModule physicsShaderModule = getShaderModule("Physics/pbf.wgsl");
+    // TODO: update this
+    wgpu::ShaderModule renderShaderModule = getShaderModule("particle_shader.wgsl");
 
     /* Create Buffers */
     // index buffer
@@ -285,7 +268,7 @@ void CreateRenderPipeline() {
                                                        NUM_PARTICLES);
 
     /* Bind Group Layouts */
-    // TODO: figure out whether I like this or direct struct brace initialization more
+    // might be uglier than direct struct brace initialization
     // Group 0: Global Bind Group
     std::array<wgpu::BindGroupLayoutEntry, 2> globalEntries{};
 
@@ -480,26 +463,64 @@ void CreateRenderPipeline() {
     physicsBG = device.CreateBindGroup(&physicsBGDesc);
 
     /* Pipelines */
+    const auto buildComputePipeline = [&](
+            const wgpu::StringView &entrypoint,
+            wgpu::ShaderModule shaderModule,
+            wgpu::PipelineLayout pipelineLayout) -> wgpu::ComputePipeline {
+        wgpu::ComputePipelineDescriptor pipelineDesc{
+                .layout = pipelineLayout,
+                .compute = {
+                        .module = shaderModule,
+                        .entryPoint = entrypoint
+                }
+        };
+
+        return device.CreateComputePipeline(&pipelineDesc);
+    };
+
+    auto buildSolverComputePipeline = [&](const wgpu::StringView &entrypoint) {
+        return buildComputePipeline(
+                entrypoint,
+                solverShaderModule,
+                solverPipelineLayout
+        );
+    };
+
+    auto buildPhysicsComputePipeline = [&](const wgpu::StringView &entrypoint) {
+        return buildComputePipeline(
+                entrypoint,
+                physicsShaderModule,
+                physicsPipelineLayout
+        );
+    };
+
+    auto buildRadixComputePipeline = [&](const wgpu::StringView &entrypoint, wgpu::ShaderModule shaderModule) {
+        return buildComputePipeline(
+                entrypoint,
+                shaderModule,
+                radixPipelineLayout
+        );
+    };
+
+//    wgpu::ComputePipeline solverBiddingPipeline, solverUpdatePipeline;
+//    wgpu::ComputePipeline radixSortPipeline, radixReorderPipeline;
+//    wgpu::ComputePipeline physicsExternalForcesPipeline, physicsSolverOnePipeline, physicsSolverThreePipeline;
     // TODO: compute pipeline entrypoint specification (especially reduction)
     // solver
-    wgpu::ComputePipelineDescriptor solverPipelineDesc{};
-    solverPipelineDesc.compute = {
-            .module = solverShaderModule,
-            .entryPoint = "main",
-    };
-    solverPipelineDesc.layout = solverPipelineLayout;
-    solverPipeline = device.CreateComputePipeline(&solverPipelineDesc);
+    solverBiddingPipeline = buildSolverComputePipeline("auctionBiddingPhase");
+    solverUpdatePipeline = buildSolverComputePipeline("auctionUpdatePhase");
 
     // radix
-    wgpu::ComputePipelineDescriptor radixPipelineDesc{};
-    radixPipelineDesc.layout = renderPipelineLayout;
-    radixPipeline = device.CreateComputePipeline(&radixPipelineDesc);
+    radixSortPipeline = buildRadixComputePipeline("radix_sort", radixSortShaderModule);
+    radixReorderPipeline = buildRadixComputePipeline("radix_reorder", radixReorderShaderModule);
 
     // pbf
-    wgpu::ComputePipelineDescriptor physicsPipelineDesc{};
-    solverPipelineDesc.layout = physicsPipelineLayout;
-    physicsPipeline = device.CreateComputePipeline(&physicsPipelineDesc);
+    physicsExternalForcesPipeline = buildPhysicsComputePipeline("pbfExternalForces");
+    physicsSolverOnePipeline = buildPhysicsComputePipeline("pbfSolverPass");
+    physicsSolverTwoPipeline = buildPhysicsComputePipeline("pbfSolverPassTwo");
+    physicsSolverThreePipeline = buildPhysicsComputePipeline("pbfSolverPassThree");
 
+    // render
     wgpu::RenderPipelineDescriptor renderPipelineDesc{};
     wgpu::ColorTargetState colorTargetState{.format=format};
 
@@ -614,60 +635,45 @@ void Render() {
     // TODO: render logic
     // TODO: isolate run once/init from render
     // Compute
+    auto solverComputePass = [&](const wgpu::ComputePipeline &pipeline) {
+        auto pass = encoder.BeginComputePass();
+        pass.SetPipeline(pipeline);
+        pass.SetBindGroup(0, globalBG);
+        pass.SetBindGroup(1, solverBG);
+        pass.End();
+    };
+
+    auto radixComputePass = [&](const wgpu::ComputePipeline &pipeline) {
+        auto pass = encoder.BeginComputePass();
+        pass.SetPipeline(pipeline);
+        pass.SetBindGroup(0, globalBG);
+        pass.SetBindGroup(1, radixBG);
+        pass.End();
+    };
+
+    auto physicsComputePass = [&](const wgpu::ComputePipeline &pipeline) {
+        auto pass = encoder.BeginComputePass();
+        pass.SetPipeline(pipeline);
+        pass.SetBindGroup(0, globalBG);
+        pass.SetBindGroup(1, physicsBG);
+        pass.End();
+    };
+
     // Step 1: Single iteration of auction phase
-    {
-        // solver - auctionBiddingPhase
-        auto pass = encoder.BeginComputePass();
-        pass.SetPipeline(solverPipeline);
-        pass.SetBindGroup(0, globalBG);
-        pass.SetBindGroup(1, solverBG);
-        pass.End();
-    }
-    {
-        // solver - auctionUpdatePhase
-        auto pass = encoder.BeginComputePass();
-        pass.SetPipeline(solverPipeline);
-        pass.SetBindGroup(0, globalBG);
-        pass.SetBindGroup(1, solverBG);
-        pass.End();
-    }
-    // Step 2: PBF: apply external forces
-    {
-        // pbf - pbfExternalForces
-        auto pass = encoder.BeginComputePass();
-        pass.SetPipeline(physicsPipeline);
-        pass.SetBindGroup(0, globalBG);
-        pass.SetBindGroup(1, physicsBG);
-        pass.End();
-    }
-    // Step 3: Radix Sort
-    {
-        // radix - radix_sort
-        auto pass = encoder.BeginComputePass();
-        pass.SetPipeline(radixPipeline);
-        pass.SetBindGroup(0, globalBG);
-        pass.SetBindGroup(1, radixBG);
-    }
-    {
-        // radix_reorder - radix_sort_reorder
-        auto pass = encoder.BeginComputePass();
-        pass.SetPipeline(radixPipeline);
-        pass.SetBindGroup(0, globalBG);
-        pass.SetBindGroup(1, radixBG);
-    }
+    solverComputePass(solverBiddingPipeline);
+    solverComputePass(solverUpdatePipeline);
 
-    // Step 4: Rest of PBF
-    // TODO: break it up into multiple @compute
-    {
-        // physics
-        auto pass = encoder.BeginComputePass();
-        pass.SetPipeline(physicsPipeline);
-        pass.SetBindGroup(0, globalBG);
-        pass.SetBindGroup(1, physicsBG);
-        pass.End();
-    }
+    // Step 2: PBF External Forces
+    physicsComputePass(physicsExternalForcesPipeline);
+    // Step 3: radix sort
+    radixComputePass(radixSortPipeline);
+    radixComputePass(radixReorderPipeline);
+    // Step 4: Continue rest of PBF
+    physicsComputePass(physicsSolverOnePipeline);
+    physicsComputePass(physicsSolverTwoPipeline);
+    physicsComputePass(physicsSolverThreePipeline);
 
-    // Render
+    // Step 5: Render
     // Vertex + Fragment shader must use render pass
     wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderpass);
     pass.SetPipeline(renderPipeline);
@@ -698,13 +704,11 @@ void Render() {
 void Simulate(uint16_t dim = 100) {
     // main - so can expose args to emscripten
     setDim(dim);
-    InitParticles();
     Init();
     Start();
 }
 
 int main() {
-    std::cout << shaderCode << std::endl;
     Simulate();
 
     // Destroy WebGPU instance

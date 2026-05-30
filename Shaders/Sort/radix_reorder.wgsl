@@ -83,22 +83,8 @@ fn radix_sort_reorder(
         // NAIVE SLOPPY COPY CODE - will optimize later
         inputParticles[GID] = outputParticles[GID];
         outputHashes[GID] = k;
-    }
-}
 
-@compute @workgroup_size(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, 1)
-fn radix_sort_reorder(
-    @builtin(workgroup_id) w_id: vec3<u32>,
-    @builtin(num_workgroups) w_dim: vec3<u32>,
-    @builtin(local_invocation_index) TID: u32, // Local thread ID
-) {
-    let WORKGROUP_ID = w_id.x + w_id.y * w_dim.x;
-    let WID = WORKGROUP_ID * THREADS_PER_WORKGROUP;
-    let GID = WID + TID; // Global thread ID
-
-    if (GID < ELEMENT_COUNT) {
-        let cur = hashes[GID];
-        // TODO: select
+        // get bin values
         let prev = select(-1, hashes[GID-1], GID > 0);
         let next = select(-1, hashes[GID+1], GID < ELEMENT_COUNT-1);
 
