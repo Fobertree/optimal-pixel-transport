@@ -12,7 +12,7 @@
 @group(1) @binding(2) var<storage, read_write> binStart: array<u32>;
 @group(1) @binding(3) var<storage, read_write> binEnd: array<u32>;
 // outputs
-@group(1) @binding(4) var<storage, read_write> outputHashes: array<u32>;
+@group(1) @binding(4) var<storage, read_write> hashes: array<u32>; // for accumulating bin counts/start
 // argsort because it's a PITA to manage a ton of swap buffers and all the assignments might lead to even worse performance than lost cache locality
 @group(1) @binding(5) var<storage, read_write> sortIndices: array<u32>;
 
@@ -64,8 +64,8 @@ fn radix_sort_reorder(
     let GID = WID + TID; // Global thread ID
 
     if (GID < ELEMENT_COUNT) {
-        let k = hashCoords(particles[GID]);
-        let v = particles[GID];
+        let k = hashCoords(inputParticles[GID].position);
+        let v = inputParticles[GID];
 
         let local_prefix = local_prefix_sum[GID];
 
@@ -76,19 +76,17 @@ fn radix_sort_reorder(
         let sorted_position = prefix_block_sum[pid] + local_prefix;
 
         // sorted index => particle index
-        sortedIndices[sorted_position] = GID;
-    }
-
-    if (GID < ELEMENT_COUNT) {
-        // NAIVE SLOPPY COPY CODE - will optimize later
-        inputParticles[GID] = outputParticles[GID];
-        outputHashes[GID] = k;
+        sortIndices[sorted_position] = GID;
+        // store key
+        hashes[GID] = k;
 
         // get bin values
-        let prev = select(-1, hashes[GID-1], GID > 0);
-        let next = select(-1, hashes[GID+1], GID < ELEMENT_COUNT-1);
+        let prev: i32 = select(-1, i32(hashes[GID-1]), GID > 0);
+        let next: i32 = select(-1, i32(hashes[GID+1]), GID < ELEMENT_COUNT-1);
 
-        // thread-safe despite duplicate hashes - only one index where writes can occur in both cases
+        let cur = i32(hashes[GID]);
+
+        // THREAD-SAFE: despite duplicate hashes - only one index where writes can occur in both cases
         if (GID == 0 || cur != prev) {
             binStart[cur] = GID;
         }

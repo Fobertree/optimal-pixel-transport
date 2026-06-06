@@ -4,11 +4,13 @@
 // Retain optimality by noting that this dual problem has greater cost by n * epsilon -> n * epsilon < 1 leads to optimality for integer costs
 // i.e., floor(dual = total cost + n * epsilon) = total_cost -> optimality
 
+// https://stanford.edu/~rezab/classes/cme323/S16/projects_reports/jin.pdf: only parallel Jacobi improves perf
+
 const INT_MAX : i32 = 2147483647;
 const TILE_SIZE : u32 = 256u;
 const MAX_SIZE : u32 = 25000; // 500^2
 // no guaranteed optimality but in practice this should be good (don't want to convert everything to float for slower calc)
-const EPSILON : f32 = 1; // TODO: migrate to params + iteratively shrink EPSILON (or just set it < 1/n)
+const EPSILON : i32 = 1;
 
 struct Particle {
     position: vec2f,
@@ -41,10 +43,12 @@ var<workgroup> tileB: array<i32, TILE_SIZE>;     // column indices for argmax
 // Pre-computed on CPU
 @group(1) @binding(1) var<storage, read> cost_matrix : array<i32>;
 
+// WGSL does not support atomic<f32>.
+// TODO: Roundabout way to ensure completmentary slackness - multiply all costs on CPU by value > N
 // Auction-specific buffers (all size MAX_SIZE)
-@group(1) @binding(2) var<storage, read_write> prices : array<f32, MAX_SIZE>;           // column prices, init to 0 on CPU
-@group(1) @binding(3) var<storage, read_write> bid_value : array<atomic<f32>, MAX_SIZE>; // highest bid per column this round
-@group(1) @binding(4) var<storage, read_write> bid_from_row : array<atomic<f32>, MAX_SIZE>; // who placed the highest bid
+@group(1) @binding(2) var<storage, read_write> prices : array<i32, MAX_SIZE>;           // column prices, init to 0 on CPU
+@group(1) @binding(3) var<storage, read_write> bid_value : array<atomic<i32>, MAX_SIZE>; // highest bid per column this round
+@group(1) @binding(4) var<storage, read_write> bid_from_row : array<atomic<i32>, MAX_SIZE>; // who placed the highest bid
 // shouldn't need the indices here
 
 var<workgroup> match_count : atomic<i32>;
@@ -77,7 +81,7 @@ fn auctionBiddingPhase(
         if (assignments[row] == -1) {
             let col = tileStart + tid;
             if (col < size) {
-                let profit = cost(row, col) - prices[col];
+                let profit = cost(row, col) - i32(prices[col]);
                 tileA[tid] = profit;
                 tileB[tid] = i32(col);
             } else {
@@ -86,7 +90,7 @@ fn auctionBiddingPhase(
             }
         }
 
-        workgroupBarrier();
+//        workgroupBarrier();
 
         if (assignments[row] == -1) {
             // local parallel reduction for max + argmax + second max
@@ -102,16 +106,21 @@ fn auctionBiddingPhase(
             }
         }
 
-        workgroupBarrier();
+//        workgroupBarrier();
     }
 
-    let bid_amount: f32 = best_profit - second_best + EPSILON;
+    let bid_amount: i32 = best_profit - second_best + EPSILON;
 
     // submit bid to best column w/ atomics
     if (best_col != -1) {
         let j = u32(best_col);
         // atomic max on bid value
         let old = atomicMax(&bid_value[j], bid_amount);
+
+        // PROBLEM: atomic store not immune to TOCTOU - race condition: B > A, both > old, B writes first, A overwrites B
+        // TOCTOU window between conditional and atomic store
+        // don't see an immediate way for CAS to fix issue - argmax
+        // don't need to address this actually - as long as we're improving bid every iteration
         if (bid_amount > old) {
             // new highest bid: bid_amount
             // store argmax_{row} bid
@@ -134,7 +143,7 @@ fn auctionUpdatePhase(
         // exec only once
         atomicStore(&match_count, 0);
     }
-    workgroupBarrier();
+//    workgroupBarrier();
 
     for (var tileStart = 0u; tileStart < size; tileStart += TILE_SIZE) {
         let col = tileStart + tid;
@@ -144,16 +153,17 @@ fn auctionUpdatePhase(
         var bidder_row : i32 = -1;
 
         if (col < size) {
-            highest_bid = atomicLoad(&bid_value[col]);
-            bidder_row = atomicLoad(&bid_from_row[col]);
+            highest_bid = i32(atomicLoad(&bid_value[col]));
+            bidder_row = i32(atomicLoad(&bid_from_row[col]));
         }
 
-        workgroupBarrier();
+//        workgroupBarrier();
 
-        if (col < size && highest_bid > prices[col]) {
+        if (col < size && highest_bid > i32(prices[col])) {
             // not critical section - no writes to reads
             // accept the bid
-            let old_owner = atomicExchange(&col_assign[col], bidder_row);
+            let old_owner = assignments[col];
+            assignments[col] = bidder_row;
 
             // update price
             prices[col] = highest_bid;
@@ -179,7 +189,7 @@ fn auctionUpdatePhase(
             atomicAdd(&match_count, 1);
         }
 
-        workgroupBarrier();
+//        workgroupBarrier();
     }
 }
 

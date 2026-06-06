@@ -33,10 +33,12 @@ struct BGLParams {
  */
 class BufferManager {
 public:
-    explicit BufferManager(wgpu::Device &device, wgpu::Queue &queue)
+    explicit BufferManager() = default; // tmp, need to figure out better approach on global scope
+    explicit BufferManager(const wgpu::Device &device, const wgpu::Queue &queue)
             : device_(device),
               queue_(queue) {
-
+        assert(device_);
+        printf("device=%p\n", device_.Get());
     }
 
     template<typename T, size_t N>
@@ -50,11 +52,19 @@ public:
     }
 
     template<typename T>
-    [[nodiscard]] wgpu::Buffer createWGPUBuffer(wgpu::BufferUsage usage, size_t N) {
+    [[nodiscard]] wgpu::Buffer
+    createWGPUBuffer(wgpu::BufferUsage usage, size_t N, const wgpu::StringView &label = "NONE") {
         // runtime instead of template arg for emscripten
+        assert(N > 0);
+        if (!device_) {
+            puts("device invalid");
+        }
+
+        puts("create wgpu buffer");
         wgpu::BufferDescriptor bufDesc{};
         bufDesc.size = N * sizeof(T);
         bufDesc.usage = usage;
+        bufDesc.label = label;
 
         return device_.CreateBuffer(&bufDesc);
     }
@@ -81,19 +91,19 @@ public:
         );
     }
 
-    template<typename... Buffers>
-    [[nodiscard]] std::vector<wgpu::BindGroupEntry> getBGEntries(Buffers &... args) {
-        // using vector over array since array would require auto return type
-        const size_t N = sizeof...(args);
-        // assume this unpacks lvalue ref, but not 100% sure
-        // worst-case, only particles need to be re-binded (buffer swap) so this should be fine
-        const std::array<const wgpu::Buffer, N> list = {args...};
-        std::vector<wgpu::BindGroupEntry> bgEntries(N);
+    using BufferInfo = std::pair<wgpu::Buffer, size_t>;
 
-        // C++23 has std enumerate
-        for (size_t i = 0; i < N; i++) {
+    std::vector<wgpu::BindGroupEntry>
+    getBGEntries(std::initializer_list<BufferInfo> args) {
+        std::vector<wgpu::BindGroupEntry> bgEntries(args.size());
+
+        size_t i = 0;
+        for (auto const &[buffer, size]: args) {
             bgEntries[i].binding = i;
-            bgEntries[i].buffer = list[i];
+            bgEntries[i].buffer = buffer;
+            bgEntries[i].offset = 0;
+            bgEntries[i].size = size * sizeof(int32_t);
+            ++i;
         }
 
         return bgEntries;

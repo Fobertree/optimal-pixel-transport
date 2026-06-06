@@ -66,7 +66,7 @@ fn radix_sort(
     let GID = WID + TID; // Global thread ID
 
     // Extract 2 bits from the input
-    let elm = select(hashCoords(inputParticles[GID]), 0, GID >= ELEMENT_COUNT);
+    let elm = select(hashCoords(inputParticles[GID].position), 0, GID >= ELEMENT_COUNT);
     let extract_bits: u32 = (elm >> CURRENT_BIT) & 0x3;
 
     var bit_prefix_sums = array<u32, 4>(0, 0, 0, 0);

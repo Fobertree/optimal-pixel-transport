@@ -40,7 +40,7 @@ struct Params {
 @group(1) @binding(1) var<storage, read_write> deltaPos: array<vec2f>;
 @group(1) @binding(2) var<storage, read_write> posStar: array<vec2f>;           // predicted positions
 @group(1) @binding(3) var<storage, read> binStart: array<i32>;
-@group(1) @binding(4) var<storage, read> binEnd: array<atomic<u32>>;
+@group(1) @binding(4) var<storage, read> binEnd: array<i32>;
 @group(1) @binding(5) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
 // solver
 @group(1) @binding(6) var<storage, read> assignments: array<i32>;
@@ -75,7 +75,7 @@ fn pbfExternalForces(@builtin(global_invocation_id) gid: vec3<u32>) {
     let eps = 1e-8;
     let cellSize = params.cellSize;
 
-    let pos = posStar[idx];
+    var pos = posStar[idx];
     let bin = hashCoords(pos);
 
     // Apply external forces
@@ -115,11 +115,12 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     var gradSum: f32 = 0.0;             // lambda denominator
 
     // 3x3 bin neighborhood search
-    let pIdx = sortedIndices[idx];
+    let pIdx = sortIndices[idx];
+    // TODO: check if i should set pos to pos or posStar
     let pos = posStar[pIdx];
     for (var dx = -1; dx <= i32(1); dx++) {
         for (var dy = -1; dy <= i32(1); dy++) {
-            let posPrime = vec2(pos.x+dx*cellSize, pos.y+dy*cellSize);
+            let posPrime = vec2(pos.x+f32(dx)*cellSize, pos.y+f32(dy)*cellSize);
             if (min(posPrime.x, posPrime.y) < -1 || max(posPrime.x, posPrime.y) > 1) {
                 // OOB, no clamp
                 continue;
@@ -131,7 +132,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
             // iterate over neighbors
             for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
                 if (jIdx == idx) {continue;}
-                let pjIdx = sortedIndices[pjIdx];
+                let pjIdx = sortIndices[jIdx];
 
                 let neiPos = posStar[pjIdx];
                 let r = pos - neiPos;
@@ -160,6 +161,8 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     } // end neighbor bin accumulation
+    // this C is different from the c (in the later XSPH viscosity stage)
+    // this C is for density constraints C_i (p_1, ..., p_n)
     let C = density * invRho0 - 1.0;
     lambdas[pIdx] = -C / (gradSum + eps);
 }
@@ -171,7 +174,9 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = params.size;
 
     if (idx >= n) {return;}
-    let pIdx = sortedIndices[idx];
+    let pIdx = sortIndices[idx];
+    // TODO: check if i should set pos to pos or posStar
+    let pos = particles[pIdx].position;
 
     let dt = params.dt;
     let H = params.H;
@@ -186,7 +191,7 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var dx: i32 = -1; dx <= 1; dx++) {
         for (var dy: i32 = -1; dy <= 1; dy++) {
-            let posPrime = vec2(pos.x+dx*cellSize, pos.y+dy*cellSize);
+            let posPrime = vec2(pos.x+f32(dx)*cellSize, pos.y+f32(dy)*cellSize);
             if (min(posPrime.x, posPrime.y) < -1 || max(posPrime.x, posPrime.y) > 1) {
                 // OOB, no clamp
                 continue;
@@ -197,7 +202,7 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
                 if (jIdx == idx) {continue;}
-                let pjIdx = sortedIndices[idx];
+                let pjIdx = sortIndices[jIdx];
 
                 let neiPos = posStar[pjIdx];
                 let r = pos - neiPos;
@@ -244,34 +249,33 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
     particles[pIdx].velocity = newVel;
 
     // XSPH viscosity
-    let C: f32 = 0.01;
     var omega_i: f32 = 0;
-    var viscosity_sum: f32 = 0;
     // for vorticity
-    var eta = vec2(0,0);
     var f_vorticity = vec2(0,0);
 
     for (var dx: i32 = -1; dx <= 1; dx++) {
         for (var dy: i32 = -1; dy <= 1; dy++) {
-            let posPrime = vec2(pos.x+dx*cellSize, pos.y+dy*cellSize);
+            let posPrime = vec2(pos.x+f32(dx)*cellSize, pos.y+f32(dy)*cellSize);
             if (min(posPrime.x, posPrime.y) < -1 || max(posPrime.x, posPrime.y) > 1) {
                 // OOB, no clamp
                 continue;
             }
             let nb = hashCoords(posPrime);
             let start = binStart[nb];
-            let cnt = atomicLoad(&binCount[nb]);
+            let end = binEnd[nb];
 
-            for (var j: u32 = 0u; j < cnt; j++) {
-                let jIdx = u32(start) + j;
+            // iterate over neighbors
+            for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
                 if (jIdx == idx) {continue;}
-                let pjIdx = sortedIndices[idx];
+                if (jIdx == idx) {continue;}
+                let pjIdx = sortIndices[jIdx];
 
                 let neiPos = posStar[pjIdx];
                 let r = pos - neiPos;
                 let dist = length(r);
                 if (dist > H || dist < 0.0001) {continue;}
 
+                // diff in velocity between particle and neighbor
                 let v_ij = particles[pjIdx].velocity - particles[pIdx].velocity;
 
                 // gradient cubic spline kernel
@@ -291,9 +295,6 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let grad = scale * r;
 
                 omega_i += v_ij.x * grad.y - v_ij.y * grad.x;
-
-                // XSPH viscosity in same loop
-                viscosity_sum += v_ij * grad;
             } // end neighbor search
             omega[pIdx] = omega_i;
         }
@@ -305,7 +306,9 @@ fn pbfSolverPassThree(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = params.size;
 
     if (idx >= n) {return;}
-    let pIdx = sortedIndices[idx];
+    let pIdx = sortIndices[idx];
+    // TODO: check if i should set pos to pos or posStar
+    let pos = particles[pIdx].position;
 
     let dt = params.dt;
     let H = params.H;
@@ -313,23 +316,28 @@ fn pbfSolverPassThree(@builtin(global_invocation_id) gid: vec3<u32>) {
     let invRho0 = 1.0 / rho0;
     let eps = 1e-8;
     let cellSize = params.cellSize;
+    var eta = vec2f(0,0);
+    var viscosity_sum = vec2f(0,0);
+
+    // TODO: migrate this to params
+    let C: f32 = 0.01;
 
     for (var dx: i32 = -1; dx <= 1; dx++) {
         for (var dy: i32 = -1; dy <= 1; dy++) {
-            let posPrime = vec2(pos.x+dx*cellSize, pos.y+dy*cellSize);
+            let posPrime = vec2(pos.x+f32(dx)*cellSize, pos.y+f32(dy)*cellSize);
             if (min(posPrime.x, posPrime.y) < -1 || max(posPrime.x, posPrime.y) > 1) {
                 // OOB, no clamp
                 continue;
             }
             let nb = hashCoords(posPrime);
             let start = binStart[nb];
-            let cnt = atomicLoad(&binCount[nb]);
+            let end = binEnd[nb];
 
             // another loop for vorticity
-            for (var j: u32 = 0u; j < cnt; j++) {
-                let jIdx = u32(start) + j;
+            for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
                 if (jIdx == idx) {continue;}
-                let pjIdx = sortedIndices[pjIdx];
+                if (jIdx == idx) {continue;}
+                let pjIdx = sortIndices[jIdx];
 
                 let neiPos = posStar[pjIdx];
                 let r = pos - neiPos;
@@ -353,8 +361,13 @@ fn pbfSolverPassThree(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let scale = dw / (H * q);
                 let grad = scale * r;
 
+                // XSPH viscosity in same loop
+                viscosity_sum += v_ij * grad;
+
                 // since in 2D, we modify the math a little
-                eta += ((abs(omega[pIdx]) - abs(omega[pjIdx])) / (density + eps)) * grad;
+                // eta for location vector
+                // TODO: check for correctness
+                eta += ((abs(omega[pIdx]) - abs(omega[pjIdx])) / (rho0 + eps)) * grad;
             } // end neighbor search for bin
         }
     } // end neighbor bin accumulation
