@@ -8,8 +8,9 @@
 
 const INT_MAX : i32 = 2147483647;
 const TILE_SIZE : u32 = 256u;
-const MAX_SIZE : u32 = 25000; // 500^2
+//const MAX_SIZE : u32 = 25000; // 500^2
 // no guaranteed optimality but in practice this should be good (don't want to convert everything to float for slower calc)
+// TODO: iteratively relax epsilon (inefficient to directly set), clamp to max(1, new_epsilon)
 const EPSILON : i32 = 1;
 
 struct Particle {
@@ -34,8 +35,8 @@ var<workgroup> tileA: array<i32, TILE_SIZE>;     // costs - prices slice
 var<workgroup> tileB: array<i32, TILE_SIZE>;     // column indices for argmax
 
 // group 0 - params (unchanged)
-@group(0) @binding(0) var<storage, read> particles : array<Particle>;
-@group(0) @binding(1) var<storage, read> params : Params;
+@group(0) @binding(0) var<storage, read_write> particles : array<Particle>;
+@group(0) @binding(1) var<uniform> params : Params;
 
 // group 1 - solver (assignments + cost_matrix)
 @group(1) @binding(0) var<storage, read_write> assignments : array<i32>; // row → col (-1 = unassigned)
@@ -46,9 +47,9 @@ var<workgroup> tileB: array<i32, TILE_SIZE>;     // column indices for argmax
 // WGSL does not support atomic<f32>.
 // TODO: Roundabout way to ensure completmentary slackness - multiply all costs on CPU by value > N
 // Auction-specific buffers (all size MAX_SIZE)
-@group(1) @binding(2) var<storage, read_write> prices : array<i32, MAX_SIZE>;           // column prices, init to 0 on CPU
-@group(1) @binding(3) var<storage, read_write> bid_value : array<atomic<i32>, MAX_SIZE>; // highest bid per column this round
-@group(1) @binding(4) var<storage, read_write> bid_from_row : array<atomic<i32>, MAX_SIZE>; // who placed the highest bid
+@group(1) @binding(2) var<storage, read_write> prices : array<i32>;           // column prices, init to 0 on CPU
+@group(1) @binding(3) var<storage, read_write> bid_value : array<atomic<i32>>; // highest bid per column this round
+@group(1) @binding(4) var<storage, read_write> bid_from_row : array<atomic<i32>>; // who placed the highest bid
 // shouldn't need the indices here
 
 var<workgroup> match_count : atomic<i32>;

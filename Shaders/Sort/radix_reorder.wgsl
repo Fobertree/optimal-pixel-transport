@@ -2,10 +2,10 @@
 // https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda
 
 @group(0) @binding(0) var<storage, read_write> inputParticles: array<Particle>;
-@group(0) @binding(1) var<storage, read> params : Params;
+@group(0) @binding(1) var<uniform> params : Params;
 
-@group(1) @binding(0) var<storage, read> local_prefix_sum: array<u32>;
-@group(1) @binding(1) var<storage, read> prefix_block_sum: array<u32>;
+@group(1) @binding(0) var<storage, read_write> local_prefix_sum: array<u32>;
+@group(1) @binding(1) var<storage, read_write> prefix_block_sum: array<u32>;
 // this is a tmp buffer in my case. I do an inefficient copy to the input buffer for ease of binding groups
 // will optimize this out later
 // TODO: rm outputParticles buffer from radix BG, then swap particle buffer on global param bg every iteration
@@ -38,7 +38,6 @@ override THREADS_PER_WORKGROUP: u32;
 override WORKGROUP_SIZE_X: u32;
 override WORKGROUP_SIZE_Y: u32;
 override CURRENT_BIT: u32;
-override ELEMENT_COUNT: u32;
 
 /* utils */
 fn hashCoords(pos: vec2f) -> u32 {
@@ -63,7 +62,9 @@ fn radix_sort_reorder(
     let WID = WORKGROUP_ID * THREADS_PER_WORKGROUP;
     let GID = WID + TID; // Global thread ID
 
-    if (GID < ELEMENT_COUNT) {
+    let size = params.size;
+
+    if (GID < size) {
         let k = hashCoords(inputParticles[GID].position);
         let v = inputParticles[GID];
 
@@ -82,7 +83,7 @@ fn radix_sort_reorder(
 
         // get bin values
         let prev: i32 = select(-1, i32(hashes[GID-1]), GID > 0);
-        let next: i32 = select(-1, i32(hashes[GID+1]), GID < ELEMENT_COUNT-1);
+        let next: i32 = select(-1, i32(hashes[GID+1]), GID < size-1);
 
         let cur = i32(hashes[GID]);
 
@@ -91,7 +92,7 @@ fn radix_sort_reorder(
             binStart[cur] = GID;
         }
 
-        if (GID == ELEMENT_COUNT-1 || cur != next) {
+        if (GID == size-1 || cur != next) {
             binEnd[cur] = GID+1;
         }
     }

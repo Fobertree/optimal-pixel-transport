@@ -21,8 +21,8 @@ struct Params {
 }
 
 // Global BG
-@group(0) @binding(0) var<storage, read> inputParticles: array<Particle>;
-@group(0) @binding(1) var<storage, read> params : Params;
+@group(0) @binding(0) var<storage, read_write> inputParticles: array<Particle>;
+@group(0) @binding(1) var<uniform> params : Params;
 
 // Radix BG
 @group(1) @binding(0) var<storage, read_write> local_prefix_sums: array<u32>; // sort hashes
@@ -39,7 +39,6 @@ override THREADS_PER_WORKGROUP: u32;
 override WORKGROUP_SIZE_X: u32;
 override WORKGROUP_SIZE_Y: u32;
 override CURRENT_BIT: u32;
-override ELEMENT_COUNT: u32;
 
 var<workgroup> s_prefix_sum: array<u32, 2 * (THREADS_PER_WORKGROUP + 1)>;
 
@@ -64,9 +63,10 @@ fn radix_sort(
     let WORKGROUP_ID = w_id.x + w_id.y * w_dim.x;
     let WID = WORKGROUP_ID * THREADS_PER_WORKGROUP;
     let GID = WID + TID; // Global thread ID
+    let size = params.size;
 
     // Extract 2 bits from the input
-    let elm = select(hashCoords(inputParticles[GID].position), 0, GID >= ELEMENT_COUNT);
+    let elm = select(hashCoords(inputParticles[GID].position), 0, GID >= size);
     let extract_bits: u32 = (elm >> CURRENT_BIT) & 0x3;
 
     var bit_prefix_sums = array<u32, 4>(0, 0, 0, 0);
@@ -76,7 +76,7 @@ fn radix_sort(
 
     if (WORKGROUP_ID < WORKGROUP_COUNT) {
         // Otherwise store the index of the last active thread in the workgroup
-        LAST_THREAD = min(THREADS_PER_WORKGROUP, ELEMENT_COUNT - WID) - 1;
+        LAST_THREAD = min(THREADS_PER_WORKGROUP, size - WID) - 1;
     }
 
     // Initialize parameters for double-buffering
@@ -127,7 +127,7 @@ fn radix_sort(
         inOffset = TID + swapOffset;
     }
 
-    if (GID < ELEMENT_COUNT) {
+    if (GID < size) {
         // Store local prefix sum to global memory
         local_prefix_sums[GID] = bit_prefix_sums[extract_bits];
     }

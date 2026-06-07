@@ -32,7 +32,7 @@ struct VertexOutput {
 };
 
 @group(0) @binding(0) var<storage, read> particles : array<Particle>;
-@group(0) @binding(1) var<storage, read> params : Params;
+@group(0) @binding(1) var<uniform> params : Params;
 
 @vertex
 fn vertexMain(in: VertexInput) -> VertexOutput {

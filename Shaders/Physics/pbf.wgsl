@@ -32,7 +32,7 @@ struct Params {
 
 // group 0 - params
 @group(0) @binding(0) var<storage, read_write> particles : array<Particle>;
-@group(0) @binding(1) var<storage, read> params : Params;
+@group(0) @binding(1) var<uniform> params : Params;
 
 // group 1 - simulation state (hot loop)
 // main pbf simulation stuff

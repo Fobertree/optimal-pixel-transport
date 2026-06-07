@@ -62,8 +62,6 @@ struct ParticleCPU {
     float x, y;
     float vX, vY;
     float r{}, g{}, b{}, a{};
-    float targetX = 0, targetY = 0;
-    bool isAssigned{false};
 //    float pad[2]{}; // need padding for vec4f
     // vec4f must start at a 16-byte aligned address
 //    float color[4];

@@ -42,11 +42,12 @@ public:
     }
 
     template<typename T, size_t N>
-    [[nodiscard]] wgpu::BindGroupLayout createBGL(const std::array<T, N> &entries) {
+    [[nodiscard]] wgpu::BindGroupLayout createBGL(const std::array<T, N> &entries, const wgpu::StringView &label) {
         wgpu::BindGroupLayoutDescriptor bglDesc;
 
         bglDesc.entryCount = entries.size();
         bglDesc.entries = entries.data();
+        bglDesc.label = label;
 
         return device_.CreateBindGroupLayout(&bglDesc);
     }
@@ -60,7 +61,7 @@ public:
             puts("device invalid");
         }
 
-        puts("create wgpu buffer");
+//        puts("create wgpu buffer");
         wgpu::BufferDescriptor bufDesc{};
         bufDesc.size = N * sizeof(T);
         bufDesc.usage = usage;
