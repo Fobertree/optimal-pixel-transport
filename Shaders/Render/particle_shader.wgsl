@@ -5,7 +5,6 @@ const particle_size = 0.088;
 struct Particle {
     position: vec2f,
     velocity: vec2f,
-    targetPos: vec2f,
     color: vec4f
 }
 
