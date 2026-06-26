@@ -94,7 +94,7 @@ public:
 
     using BufferInfo = std::pair<wgpu::Buffer, size_t>;
 
-    std::vector<wgpu::BindGroupEntry>
+    static std::vector<wgpu::BindGroupEntry>
     getBGEntries(std::initializer_list<BufferInfo> args) {
         std::vector<wgpu::BindGroupEntry> bgEntries(args.size());
 
@@ -103,7 +103,7 @@ public:
             bgEntries[i].binding = i;
             bgEntries[i].buffer = buffer;
             bgEntries[i].offset = 0;
-            bgEntries[i].size = size * sizeof(int32_t);
+            bgEntries[i].size = buffer.GetSize();
             ++i;
         }
 

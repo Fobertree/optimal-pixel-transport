@@ -75,6 +75,8 @@ fn pbfExternalForces(@builtin(global_invocation_id) gid: vec3<u32>) {
     let eps = 1e-8;
     let cellSize = params.cellSize;
 
+    posStar[idx] = particles[idx].position;
+
     var pos = posStar[idx];
     let bin = hashCoords(pos);
 
@@ -93,6 +95,8 @@ fn pbfExternalForces(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     posStar[idx] = pos + vel * dt;
+    // For radix - possibly redundant but I don't want to rebind everything
+    particles[idx].position = posStar[idx];
 }
 
 @compute @workgroup_size(TILE_SIZE)

@@ -22,6 +22,9 @@
 // tmp spaghetti var bc gcc doesn't detect changes/re-compile on wgsl-only changes
 bool bob = true;
 
+template<typename T>
+using vec2 = std::array<T, 2>;
+
 wgpu::Instance instance;
 wgpu::Adapter adapter;
 wgpu::Device device;
@@ -97,6 +100,7 @@ auto solverComputePass = [](const wgpu::ComputePipeline &pipeline) {
     pass.SetPipeline(pipeline);
     pass.SetBindGroup(0, globalComputeBG);
     pass.SetBindGroup(1, solverBG);
+    pass.DispatchWorkgroups(256);
     pass.End();
 };
 
@@ -106,6 +110,7 @@ auto radixComputePass = [](const std::vector<wgpu::ComputePipeline> &pipelines) 
         pass.SetPipeline(pipeline);
         pass.SetBindGroup(0, globalComputeBG);
         pass.SetBindGroup(1, radixBG);
+        pass.DispatchWorkgroups(256);
         pass.End();
     }
 };
@@ -115,6 +120,7 @@ auto physicsComputePass = [](const wgpu::ComputePipeline &pipeline) {
     pass.SetPipeline(pipeline);
     pass.SetBindGroup(0, globalComputeBG);
     pass.SetBindGroup(1, physicsBG);
+    pass.DispatchWorkgroups(256);
     pass.End();
 };
 
@@ -337,14 +343,17 @@ void CreateRenderPipeline() {
                                                                 NUM_PARTICLES, "sortIndices");
     // PBF/Physics
     // lambda
-    lambdasBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                            NUM_PARTICLES, "lambda");
+    lambdasBuffer = bufferManager.createWGPUBuffer<vec2<int32_t>>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_PARTICLES, "lambda");
     // deltaPos
-    deltaPosBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                             NUM_PARTICLES, "deltaPos");
+    deltaPosBuffer = bufferManager.createWGPUBuffer<vec2<int32_t>>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_PARTICLES, "deltaPos");
     // posStar
-    posStarBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                            NUM_PARTICLES, "posStar");
+    posStarBuffer = bufferManager.createWGPUBuffer<vec2<int32_t>>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_PARTICLES, "posStar");
     // binStart
     binStartBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
                                                              NUM_PARTICLES, "binStart");
@@ -569,7 +578,7 @@ void CreateRenderPipeline() {
     assert(bidFromRowBuffer);
     assert(solverBGL);
 
-    std::vector<wgpu::BindGroupEntry> solverBGEntries = bufferManager.getBGEntries(
+    std::vector<wgpu::BindGroupEntry> solverBGEntries = BufferManager::getBGEntries(
             {
                     {assignmentsBuffer,
                             NUM_PARTICLES_SQ},
@@ -608,7 +617,7 @@ void CreateRenderPipeline() {
     assert(sortIndicesBuffer);
 
     // group 2 - radix group
-    std::vector<wgpu::BindGroupEntry> radixBGEntries = bufferManager.getBGEntries(
+    std::vector<wgpu::BindGroupEntry> radixBGEntries = BufferManager::getBGEntries(
             {{localPrefixSumBuffer, NUM_PARTICLES},
              {prefixBlockSumBuffer, NUM_PARTICLES},
              {binStartBuffer,       NUM_PARTICLES},
@@ -637,17 +646,17 @@ void CreateRenderPipeline() {
     assert(assignmentsBuffer);
     assert(targetParticleBuffer);
     assert(sortIndicesBuffer);
-    std::vector<wgpu::BindGroupEntry> physicsBGEntries = bufferManager.getBGEntries({{lambdasBuffer,     NUM_PARTICLES},
-                                                                                     {deltaPosBuffer,    NUM_PARTICLES},
-                                                                                     {posStarBuffer,     NUM_PARTICLES},
-                                                                                     {binStartBuffer,    NUM_PARTICLES},
-                                                                                     {binEndBuffer,      NUM_PARTICLES},
-                                                                                     {omegaBuffer,       NUM_PARTICLES},
-                                                                                     {assignmentsBuffer, NUM_PARTICLES},
-                                                                                     {targetParticleBuffer,
-                                                                                                         NUM_PARTICLES},
-                                                                                     {sortIndicesBuffer,
-                                                                                                         NUM_PARTICLES}});
+    std::vector<wgpu::BindGroupEntry> physicsBGEntries = BufferManager::getBGEntries({{lambdasBuffer,     NUM_PARTICLES},
+                                                                                      {deltaPosBuffer,    NUM_PARTICLES},
+                                                                                      {posStarBuffer,     NUM_PARTICLES},
+                                                                                      {binStartBuffer,    NUM_PARTICLES},
+                                                                                      {binEndBuffer,      NUM_PARTICLES},
+                                                                                      {omegaBuffer,       NUM_PARTICLES},
+                                                                                      {assignmentsBuffer, NUM_PARTICLES},
+                                                                                      {targetParticleBuffer,
+                                                                                                          NUM_PARTICLES},
+                                                                                      {sortIndicesBuffer,
+                                                                                                          NUM_PARTICLES}});
 
     assert(physicsBGEntries.size() == physicsEntries.size());
 
@@ -878,7 +887,6 @@ void Render() {
             .colorAttachments = &attachment};
 
     // Compute
-
     encoder = device.CreateCommandEncoder();
     // Step 1: Single iteration of auction phase
     solverComputePass(solverBiddingPipeline);
