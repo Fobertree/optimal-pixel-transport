@@ -8,6 +8,10 @@ Resources:
 const TILE_SIZE : u32 = 256u; // workgroup length
 const NEIGHBORHOOD_SIZE : f32 = 0.05; // hyperparam for calc particle neighborhood via counting sort
 const NUM_BINS : u32 = 50000u;
+const ASSIGNMENT_PULL : f32 = 42.0;       // spring constant toward assigned target
+const ASSIGNMENT_DAMPING : f32 = 10.0;    // velocity damping — prevents oscillation / teleport feel
+const MAX_PBF_CORRECTION : f32 = 0.06;    // cap density correction per iter to avoid position spikes
+const PBF_VELOCITY_BLEND : f32 = 0.15;    // blend constraint vel into assignment-driven vel (low = smoother)
 
 struct Particle {
     position: vec2f,
@@ -44,7 +48,7 @@ struct Params {
 @group(1) @binding(4) var<storage, read_write> binEnd: array<u32>;
 @group(1) @binding(5) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
 // solver
-@group(1) @binding(6) var<storage, read> assignments: array<i32>;
+@group(1) @binding(6) var<storage, read_write> assignments: array<atomic<i32>>;
 @group(1) @binding(7) var<storage, read> targetParticles : array<TargetPos>;    // constant, don't need to swap
 // single layer of indirection
 @group(1) @binding(8) var<storage, read> sortIndices: array<u32>;
@@ -78,27 +82,22 @@ fn pbfExternalForces(@builtin(global_invocation_id) gid: vec3<u32>) {
     let eps = 1e-8;
     let cellSize = params.cellSize;
 
-    posStar[idx] = particles[idx].position;
-
-    var pos = posStar[idx];
-    let bin = hashCoords(pos);
-
-    // Apply external forces
-    // don't need sorted particles here
+    var pos = particles[idx].position;
     var vel = particles[idx].velocity;
-    let targetIdx = assignments[idx];
-    if (targetIdx >= 0 && targetIdx < i32(n)) {
-        let targetPos = targetParticles[u32(targetIdx)].position;
-        let dir = targetPos - pos;
-        let dist = length(dir);
-        if (dist > 0.0001) {
-            // 0.5 "pull strength" hyperparameter
-            pos += normalize(dir) * min(dist, 0.02) * dt * 0.5;
-        }
-    }
 
-    posStar[idx] = pos + vel * dt;
-    particles[idx].position = posStar[idx];
+    // Apply assignment pull via spring-damper on velocity (smooth even when auction reassigns)
+    let targetIdx = atomicLoad(&assignments[idx]);
+    var targetPos = targetParticles[idx].position; // identity slot while unassigned
+    if (targetIdx >= 0 && targetIdx < i32(n)) {
+        targetPos = targetParticles[u32(targetIdx)].position;
+    }
+    let dir = targetPos - pos;
+    vel += (dir * ASSIGNMENT_PULL - vel * ASSIGNMENT_DAMPING) * dt;
+
+    pos += vel * dt;
+    posStar[idx] = pos;
+    particles[idx].position = pos;
+    particles[idx].velocity = vel;
 }
 
 @compute @workgroup_size(TILE_SIZE)
@@ -151,6 +150,8 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (idx >= n) {return;}
 
+    let pIdx = sortIndices[idx];
+
     let dt = params.dt;
     let H = params.H;
     let rho0 = params.rho0;
@@ -163,7 +164,6 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     var gradSum: f32 = 0.0;             // lambda denominator
 
     // 3x3 bin neighborhood search
-    let pIdx = sortIndices[idx];
     // TODO: check if i should set pos to pos or posStar
     let pos = posStar[pIdx];
     for (var dx = -1; dx <= i32(1); dx++) {
@@ -282,12 +282,21 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
     } // end neighbor bin accumulation
 
     // calculate delta pos
-    deltaPos[pIdx] = dPos * invRho0;
+    var correction = dPos * invRho0;
+    deltaPos[pIdx] = correction;
 
     // skip collision detection + response - no solids
 
-    posStar[pIdx] = pos + deltaPos[pIdx];
-    particles[pIdx].velocity = (posStar[pIdx] - pos) / dt;
+    // Cap density correction — uncapped lambda steps cause occasional teleports
+    let corrLen = length(correction);
+    if (corrLen > MAX_PBF_CORRECTION) {
+        correction = correction * (MAX_PBF_CORRECTION / corrLen);
+    }
+
+    let prevVel = particles[pIdx].velocity;
+    posStar[pIdx] = pos + correction;
+    let constraintVel = correction / dt;
+    particles[pIdx].velocity = mix(prevVel, constraintVel, PBF_VELOCITY_BLEND);
 
     var omega_i: f32 = 0;
 
