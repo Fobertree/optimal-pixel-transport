@@ -1,9 +1,22 @@
+// naive particle shader (adapted to BG)
 // abstract-float
 const particle_size = 0.088;
 
 struct Particle {
     position: vec2f,
+    velocity: vec2f,
     color: vec4f
+}
+
+struct Params {
+    size : u32,
+    // Below: unused (just for BG consistency)
+    rho0 : f32,
+    H: f32,         // kernel smoothing radius
+    dt: f32,        // TODO: instead of hardcoding this, maybe expose this to CFL conditions
+    solverIterations: u32,
+    cellSize: f32,
+    numBins: u32,
 }
 
 struct VertexInput {
@@ -17,8 +30,8 @@ struct VertexOutput {
     // other inter-stage variables alongside @location
 };
 
-@group(0) @binding(0)
-var<storage, read> particles : array<Particle>;
+@group(0) @binding(0) var<storage, read> particles : array<Particle>;
+@group(0) @binding(1) var<uniform> params : Params;
 
 @vertex
 fn vertexMain(in: VertexInput) -> VertexOutput {

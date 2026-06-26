@@ -14,6 +14,9 @@ constexpr uint32_t kHeight = 512;
 
 constexpr int MAX_CPU_PARTICLES = 10000; // for bind group
 
+constexpr uint32_t kTileSize = 256u;
+constexpr uint32_t kRadixWorkgroupCount = 256u;
+
 constexpr double DT = 5e-1;
 constexpr float EPSILON = 1e-9; // prevent collision blowup
 

@@ -28,10 +28,6 @@ public:
 
     virtual ~SolverBase() = default;
 
-    ParticleBuffer &getSrcBuf() { return src_buf_; }
-
-    [[nodiscard]] const ParticleBuffer &getSrcBuf() const { return src_buf_; }
-
     // TODO: BENCHMARK THEN FPS UTIL CLASS
     void iterate() {
         // virtual derived solver
@@ -58,6 +54,9 @@ public:
 
     [[nodiscard]] const std::vector<ParticleCPU> &
     getParticleCPUBuffer() const { return src_buf_.getParticleCPUBuffer(); }
+
+    [[nodiscard]] const std::vector<TargetParticleCPU>
+    getTargetParticleCPUBuffer() const { return target_buf_.getTargetParticleCPUBuffer(); }
 
 protected:
     // declare pure virtual functions
