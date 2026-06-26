@@ -32,7 +32,7 @@ struct Params {
 // outputs
 @group(1) @binding(4) var<storage, read_write> outputHashes: array<u32>;
 // argsort because it's a PITA to manage a ton of swap buffers and all the assignments might lead to even worse performance than lost cache locality
-@group(1) @binding(5) var<storage, read_write> sortIndices: array<u32>;
+@group(1) @binding(5) var<storage, read> sortIndices: array<u32>;
 
 override WORKGROUP_COUNT: u32;
 override THREADS_PER_WORKGROUP: u32;
@@ -65,8 +65,9 @@ fn radix_sort(
     let GID = WID + TID; // Global thread ID
     let size = params.size;
 
-    // Extract 2 bits from the input
-    let elm = select(hashCoords(inputParticles[GID].position), 0, GID >= size);
+    // Argsort: thread gid processes the particle currently at sorted slot gid
+    let particle_idx = sortIndices[GID];
+    let elm = select(hashCoords(inputParticles[particle_idx].position), 0, GID >= size);
     let extract_bits: u32 = (elm >> CURRENT_BIT) & 0x3;
 
     var bit_prefix_sums = array<u32, 4>(0, 0, 0, 0);

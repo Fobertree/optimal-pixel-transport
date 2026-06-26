@@ -72,7 +72,11 @@ struct TargetParticleCPU {
 
     TargetParticleCPU(float x, float y) : x(x), y(y) {};
 
+    TargetParticleCPU(float x, float y, std::array<float, 4> color)
+            : x(x), y(y), r(color[0]), g(color[1]), b(color[2]), a(color[3]) {};
+
     float x, y;
+    float r{}, g{}, b{}, a{};
 };
 
 

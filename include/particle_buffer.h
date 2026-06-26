@@ -15,6 +15,49 @@
 #include "particle.h"
 #include "image.h"
 
+namespace {
+
+[[nodiscard]] std::array<float, 2> gridToSimPos(float pi, float pj) {
+    return {(pj - .5f) * 1.5f, (pi - .5f) * 1.5f};
+}
+
+} // namespace
+
+// Lightweight loaders for GPU upload — decode image once, sample grid, free pixels.
+[[nodiscard]] inline std::vector<ParticleCPU> loadSourceParticlesFromImage(
+        const std::string &path, int gridW, int gridH) {
+    Image image(path);
+    std::vector<ParticleCPU> out;
+    out.reserve(static_cast<size_t>(gridW) * gridH);
+    for (int i = 0; i < gridH; i++) {
+        for (int j = 0; j < gridW; j++) {
+            const float pi = static_cast<float>(i) / static_cast<float>(gridH);
+            const float pj = static_cast<float>(j) / static_cast<float>(gridW);
+            const auto rgb = image.rgb_interpolate(pi, pj);
+            const auto pos = gridToSimPos(pi, pj);
+            out.emplace_back(pos[0], pos[1], std::array<float, 4>{rgb[0], rgb[1], rgb[2], 1});
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] inline std::vector<TargetParticleCPU> loadTargetParticlesFromImage(
+        const std::string &path, int gridW, int gridH) {
+    Image image(path);
+    std::vector<TargetParticleCPU> out;
+    out.reserve(static_cast<size_t>(gridW) * gridH);
+    for (int i = 0; i < gridH; i++) {
+        for (int j = 0; j < gridW; j++) {
+            const float pi = static_cast<float>(i) / static_cast<float>(gridH);
+            const float pj = static_cast<float>(j) / static_cast<float>(gridW);
+            const auto rgb = image.rgb_interpolate(pi, pj);
+            const auto pos = gridToSimPos(pi, pj);
+            out.emplace_back(pos[0], pos[1], std::array<float, 4>{rgb[0], rgb[1], rgb[2], 1});
+        }
+    }
+    return out;
+}
+
 /*
  * Wrapper around VBO
  * Also contains physics - collision, Particle attr update
@@ -98,7 +141,8 @@ public:
         res.reserve(N);
         for (auto &particle: buf_) {
             auto pos = particle->getPos();
-            res.emplace_back(pos);
+            auto color = particle->getColor();
+            res.emplace_back(pos[0], pos[1], color);
         }
         return res;
     }

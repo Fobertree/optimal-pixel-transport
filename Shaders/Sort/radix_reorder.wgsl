@@ -13,8 +13,8 @@
 @group(1) @binding(3) var<storage, read_write> binEnd: array<u32>;
 // outputs
 @group(1) @binding(4) var<storage, read_write> hashes: array<u32>; // for accumulating bin counts/start
-// argsort because it's a PITA to manage a ton of swap buffers and all the assignments might lead to even worse performance than lost cache locality
-@group(1) @binding(5) var<storage, read_write> sortIndices: array<u32>;
+@group(1) @binding(5) var<storage, read> sortIndicesIn: array<u32>;
+@group(1) @binding(6) var<storage, read_write> sortIndicesOut: array<u32>;
 
 struct Params {
     // Below: unused (just for BG consistency)
@@ -65,35 +65,16 @@ fn radix_sort_reorder(
     let size = params.size;
 
     if (GID < size) {
-        let k = hashCoords(inputParticles[GID].position);
-        let v = inputParticles[GID];
+        let particle_idx = sortIndicesIn[GID];
+        let k = hashCoords(inputParticles[particle_idx].position);
 
         let local_prefix = local_prefix_sum[GID];
 
-        // Calculate new position
         let extract_bits = (k >> CURRENT_BIT) & 0x3;
         let pid = extract_bits * WORKGROUP_COUNT + WORKGROUP_ID;
-        // true prefix sum = local_prefix + prefix block sum
         let sorted_position = prefix_block_sum[pid] + local_prefix;
 
-        // sorted index => particle index
-        sortIndices[sorted_position] = GID;
-        // store key
+        sortIndicesOut[sorted_position] = particle_idx;
         hashes[GID] = k;
-
-        // get bin values
-        let prev: i32 = select(-1, i32(hashes[GID-1]), GID > 0);
-        let next: i32 = select(-1, i32(hashes[GID+1]), GID < size-1);
-
-        let cur = i32(hashes[GID]);
-
-        // THREAD-SAFE: despite duplicate hashes - only one index where writes can occur in both cases
-        if (GID == 0 || cur != prev) {
-            binStart[cur] = GID;
-        }
-
-        if (GID == size-1 || cur != next) {
-            binEnd[cur] = GID+1;
-        }
     }
 }

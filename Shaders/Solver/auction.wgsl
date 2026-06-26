@@ -18,14 +18,25 @@ const INT_MAX : i32 = 2147483647;
 const INT_MIN : i32 = -100000;
 const TILE_SIZE : u32 = 256;
 
-// relax to 1 - cost buffer must be multiplied > n for epsilon complementary slackness
-// TODO: epsilon scaling
+// Matches RGB_DIST_INT_HYBRID on CPU (cost_function.h)
+const RGB_WEIGHT : f32 = 0.9;
+const INT_FACTOR : f32 = 100000.0;
+const RGB_SCALE : f32 = 500.0;
+const DIST_SCALE : f32 = 50.0;
+
 override EPSILON : i32;
+// CPU previously multiplied stored costs by 2 * NUM_PARTICLES for complementary slackness
+override COST_MULTIPLIER : i32;
 
 struct Particle {
     position: vec2f,
     velocity: vec2f,
     color: vec4f
+};
+
+struct TargetParticle {
+    position: vec2f,
+    color: vec4f,
 };
 
 struct Params {
@@ -43,12 +54,9 @@ struct Params {
 @group(0) @binding(0) var<storage, read_write> particles : array<Particle>;
 @group(0) @binding(1) var<uniform> params : Params;
 
-// group 1 - solver (assignments + cost_matrix)
+// group 1 - solver
 @group(1) @binding(0) var<storage, read_write> assignments : array<atomic<i32>>; // row → col (-1 = unassigned)
-
-// Pre-computed on CPU
-// Note: Assumes roundabout way to ensure complementary slackness - multiply all costs on CPU by value > N
-@group(1) @binding(1) var<storage, read> cost_matrix : array<i32>;
+@group(1) @binding(1) var<storage, read> target_particles : array<TargetParticle>;
 
 // WGSL does not support atomic<f32>.
 // Auction-specific buffers (all size MAX_SIZE)
@@ -58,7 +66,21 @@ struct Params {
 @group(1) @binding(5) var<storage, read_write> owner : array<i32>;  // col idx -> row idx - basically prev for assignments
 
 fn cost(i : u32, j : u32) -> i32 {
-    return cost_matrix[i * params.size + j];
+    let src = particles[i];
+    let tgt = target_particles[j];
+
+    let dr = src.color.r - tgt.color.r;
+    let dg = src.color.g - tgt.color.g;
+    let db = src.color.b - tgt.color.b;
+    let rgb_cost = i32((dr * dr + dg * dg + db * db) * RGB_SCALE);
+
+    let dx = src.position.x - tgt.position.x;
+    let dy = src.position.y - tgt.position.y;
+    let dist_cost = i32((dx * dx + dy * dy) * DIST_SCALE);
+
+    let blended = RGB_WEIGHT * f32(rgb_cost) + (1.0 - RGB_WEIGHT) * f32(dist_cost);
+    let scaled = i32(blended * INT_FACTOR);
+    return scaled * COST_MULTIPLIER;
 }
 
 @compute @workgroup_size(TILE_SIZE)

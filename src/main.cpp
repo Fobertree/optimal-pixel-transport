@@ -1,4 +1,8 @@
 #include <iostream>
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+#include <stdexcept>
 // GLFW wasm32-emscripten triplet
 #include <GLFW/glfw3.h>
 
@@ -13,14 +17,16 @@
 #include <webgpu/webgpu_glfw.h>
 
 #include "declare.h"
-#include "solver.h"
 #include "readfile.h"
 #include "buffermanager.h"
+#include "particle.h"
+#include "particle_buffer.h"
+#include "consts.h"
 
 #define WATCH(x) (std::cout << #x << " = " << (x) << std::endl)
 
 // tmp spaghetti var bc gcc doesn't detect changes/re-compile on wgsl-only changes
-bool bob = true;
+bool bob = false;
 
 template<typename T>
 using vec2 = std::array<T, 2>;
@@ -40,11 +46,11 @@ wgpu::Buffer particleBuffer;
 wgpu::Buffer paramsBuffer;
 // solver
 wgpu::Buffer assignmentsBuffer;
-wgpu::Buffer costBuffer;
 wgpu::Buffer pricesBuffer;
 wgpu::Buffer bidValueBuffer;
 wgpu::Buffer bidFromRowBuffer;
-wgpu::Buffer sortIndicesBuffer; // start with std::iota, shared between solver and radix
+wgpu::Buffer sortIndicesBuffer;
+wgpu::Buffer sortIndicesAltBuffer;
 wgpu::Buffer ownerBuffer;
 // pbf
 wgpu::Buffer lambdasBuffer;
@@ -61,16 +67,12 @@ wgpu::Buffer outputHashBuffer;
 
 wgpu::ComputePipeline solverBiddingPipeline, solverUpdatePipeline, solverInitPipeline;
 std::vector<wgpu::ComputePipeline> radixSortPipelines, radixReorderPipelines;
-wgpu::ComputePipeline physicsExternalForcesPipeline, physicsSolverOnePipeline, physicsSolverTwoPipeline, physicsSolverThreePipeline;
+wgpu::ComputePipeline radixScanPipeline;
+wgpu::ComputePipeline physicsExternalForcesPipeline, physicsClearBinsPipeline, physicsBuildBinsPipeline;
+wgpu::ComputePipeline physicsSolverOnePipeline, physicsSolverTwoPipeline, physicsSolverThreePipeline;
 wgpu::RenderPipeline renderPipeline;
 
-wgpu::BindGroup globalComputeBG, globalRenderBG, solverBG, physicsBG, radixBG;
-
-std::vector<ParticleCPU> particleCPUData;
-std::vector<TargetParticleCPU> targetParticleCPUData;
-
-// ptr for runtime polymorphism
-SolverBase *solver;
+wgpu::BindGroup globalComputeBG, globalRenderBG, solverBG, physicsBG, radixBG, radixBGAlt;
 
 BufferManager bufferManager;
 
@@ -93,26 +95,53 @@ struct Params {
     uint32_t numBins;
 };
 
-int32_t DIM, NUM_PARTICLES, NUM_PARTICLES_SQ;
+int32_t DIM, NUM_PARTICLES;
+uint32_t NUM_BINS;
+int32_t RADIX_PASS_COUNT;
+uint32_t COMPUTE_WORKGROUPS;
+int32_t AUCTION_ITERS_PER_FRAME;
+int32_t AUCTION_EPSILON;
+
+[[nodiscard]] int32_t auctionIterationsPerFrame(int32_t numParticles) {
+    // Parallel auction needs multiple Jacobi rounds; spread work across frames.
+    return std::clamp(static_cast<int32_t>(std::sqrt(static_cast<double>(numParticles))), 4, 48);
+}
+
+[[nodiscard]] int32_t auctionEpsilon(int32_t numParticles) {
+    // Costs are scaled by 2*n on CPU; keep bid increments meaningful but < typical cost gaps.
+    return std::max(1, numParticles / 4);
+}
+
+void updateDispatchConstants() {
+    COMPUTE_WORKGROUPS = (static_cast<uint32_t>(NUM_PARTICLES) + kTileSize - 1u) / kTileSize;
+    AUCTION_ITERS_PER_FRAME = auctionIterationsPerFrame(NUM_PARTICLES);
+    AUCTION_EPSILON = auctionEpsilon(NUM_PARTICLES);
+}
+
+[[nodiscard]] int32_t radixPassesForBins(uint32_t numBins) {
+    if (numBins <= 1u) {
+        return 1;
+    }
+    int32_t bits = 0;
+    auto v = numBins - 1u;
+    while (v > 0u) {
+        ++bits;
+        v >>= 1u;
+    }
+    int32_t passes = (bits + 1) / 2;
+    if (passes % 2 != 0) {
+        ++passes;
+    }
+    return passes;
+}
 
 auto solverComputePass = [](const wgpu::ComputePipeline &pipeline) {
     auto pass = encoder.BeginComputePass();
     pass.SetPipeline(pipeline);
     pass.SetBindGroup(0, globalComputeBG);
     pass.SetBindGroup(1, solverBG);
-    pass.DispatchWorkgroups(256);
+    pass.DispatchWorkgroups(COMPUTE_WORKGROUPS);
     pass.End();
-};
-
-auto radixComputePass = [](const std::vector<wgpu::ComputePipeline> &pipelines) {
-    for (const auto &pipeline: pipelines) {
-        auto pass = encoder.BeginComputePass();
-        pass.SetPipeline(pipeline);
-        pass.SetBindGroup(0, globalComputeBG);
-        pass.SetBindGroup(1, radixBG);
-        pass.DispatchWorkgroups(256);
-        pass.End();
-    }
 };
 
 auto physicsComputePass = [](const wgpu::ComputePipeline &pipeline) {
@@ -120,18 +149,20 @@ auto physicsComputePass = [](const wgpu::ComputePipeline &pipeline) {
     pass.SetPipeline(pipeline);
     pass.SetBindGroup(0, globalComputeBG);
     pass.SetBindGroup(1, physicsBG);
-    pass.DispatchWorkgroups(256);
+    pass.DispatchWorkgroups(COMPUTE_WORKGROUPS);
     pass.End();
 };
 
 void setDim(uint16_t dim) {
-    // lowkey spaghetti
     DIM = dim;
     NUM_PARTICLES = DIM * DIM;
-    NUM_PARTICLES_SQ = NUM_PARTICLES * NUM_PARTICLES;
+    updateDispatchConstants();
 
+    WATCH(DIM);
     WATCH(NUM_PARTICLES);
-    WATCH(NUM_PARTICLES_SQ);
+    WATCH(COMPUTE_WORKGROUPS);
+    WATCH(AUCTION_ITERS_PER_FRAME);
+    WATCH(AUCTION_EPSILON);
 }
 
 void Start() {
@@ -245,28 +276,20 @@ void ConfigureSurface() {
 }
 
 void CreateRenderPipeline() {
-    using COST_ITEM_T = int32_t;
+    auto particleCPUData = loadSourceParticlesFromImage("img_1.png", DIM, DIM);
+    auto targetParticleCPUData = loadTargetParticlesFromImage("img_6.png", DIM, DIM);
 
-    // cost buffer
-    auto srcBuf = ParticleBuffer("img_1.png", DIM, DIM);
-    auto tarBuf = ParticleBuffer("img_6.png", DIM, DIM);
+    NUM_BINS = 256u;
+    RADIX_PASS_COUNT = radixPassesForBins(NUM_BINS);
 
-    particleCPUData = srcBuf.getParticleCPUBuffer();
-    targetParticleCPUData = tarBuf.getTargetParticleCPUBuffer();
-
-    auto cost_buffer = get_cost_buffer<COST_TYPE::RGB_DIST_INT_HYBRID, COST_ITEM_T>(srcBuf, tarBuf, NUM_PARTICLES);
-
-    // params struct
-    // TODO: init values - for now just passing some garbage temp values
-    int num_bins = 4;
-
-    Params params{.size = DIM,
-            .rho0 = 0.5,
-            .H = 0.1,
-            .dt = 0.5,
-            .solverIterations = 0, // TODO: remove
-            .cellSize = 2.f / static_cast<float>(num_bins),
-            .numBins = static_cast<uint32_t>(num_bins),
+    constexpr float H = 0.1f;
+    Params params{.size = NUM_PARTICLES,
+            .rho0 = 0.5f,
+            .H = H,
+            .dt = 1.f / 60.f,
+            .solverIterations = 0,
+            .cellSize = H,
+            .numBins = NUM_BINS,
     };
 
     /* Load Shader Modules */
@@ -281,6 +304,7 @@ void CreateRenderPipeline() {
     wgpu::ShaderModule solverShaderModule = getShaderModule("Solver/auction.wgsl");
     wgpu::ShaderModule radixSortShaderModule = getShaderModule("Sort/radix.wgsl");
     wgpu::ShaderModule radixReorderShaderModule = getShaderModule("Sort/radix_reorder.wgsl");
+    wgpu::ShaderModule radixScanShaderModule = getShaderModule("Sort/radix_scan.wgsl");
     wgpu::ShaderModule physicsShaderModule = getShaderModule("Physics/pbf.wgsl");
     // TODO: update this
     wgpu::ShaderModule renderShaderModule = getShaderModule("Render/particle_shader.wgsl");
@@ -308,12 +332,9 @@ void CreateRenderPipeline() {
 
     /* Solver */
 
-    // cost buffer
-    costBuffer = bufferManager.createWGPUBuffer<int32_t>(
-            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, NUM_PARTICLES_SQ, "cost");
-    // assignments buffer
+    // assignments buffer (one entry per source particle / row)
     assignmentsBuffer = bufferManager.createWGPUBuffer<int32_t>(
-            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, NUM_PARTICLES_SQ, "assignments");
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, NUM_PARTICLES, "assignments");
     // prices buffer
     pricesBuffer = bufferManager.createWGPUBuffer<int32_t>(
             wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, NUM_PARTICLES, "prices");
@@ -328,44 +349,44 @@ void CreateRenderPipeline() {
                                                           NUM_PARTICLES, "owner");
 
     /* Radix */
-    localPrefixSumBuffer = bufferManager.createWGPUBuffer<int32_t>(
+    localPrefixSumBuffer = bufferManager.createWGPUBuffer<uint32_t>(
             wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
             NUM_PARTICLES, "local prefix");
-    // block sum buffer
-    prefixBlockSumBuffer = bufferManager.createWGPUBuffer<int32_t>(
+    prefixBlockSumBuffer = bufferManager.createWGPUBuffer<uint32_t>(
             wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-            NUM_PARTICLES, "prefix block sum");
+            4 * 256, "prefix block sum");
 
-    outputHashBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                               NUM_PARTICLES, "hash");
+    outputHashBuffer = bufferManager.createWGPUBuffer<uint32_t>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_PARTICLES, "hash");
 
-    sortIndicesBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                                NUM_PARTICLES, "sortIndices");
+    sortIndicesBuffer = bufferManager.createWGPUBuffer<uint32_t>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_PARTICLES, "sortIndices");
+    sortIndicesAltBuffer = bufferManager.createWGPUBuffer<uint32_t>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_PARTICLES, "sortIndicesAlt");
     // PBF/Physics
-    // lambda
-    lambdasBuffer = bufferManager.createWGPUBuffer<vec2<int32_t>>(
+    lambdasBuffer = bufferManager.createWGPUBuffer<float>(
             wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
             NUM_PARTICLES, "lambda");
-    // deltaPos
-    deltaPosBuffer = bufferManager.createWGPUBuffer<vec2<int32_t>>(
+    deltaPosBuffer = bufferManager.createWGPUBuffer<vec2<float>>(
             wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
             NUM_PARTICLES, "deltaPos");
-    // posStar
-    posStarBuffer = bufferManager.createWGPUBuffer<vec2<int32_t>>(
+    posStarBuffer = bufferManager.createWGPUBuffer<vec2<float>>(
             wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
             NUM_PARTICLES, "posStar");
-    // binStart
-    binStartBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                             NUM_PARTICLES, "binStart");
-    // binEnd
-    binEndBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                           NUM_PARTICLES, "binEnd");
-    // omegaBuffer
-    omegaBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                          NUM_PARTICLES, "omega");
+    binStartBuffer = bufferManager.createWGPUBuffer<uint32_t>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_BINS, "binStart");
+    binEndBuffer = bufferManager.createWGPUBuffer<uint32_t>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_BINS, "binEnd");
+    omegaBuffer = bufferManager.createWGPUBuffer<float>(
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+            NUM_PARTICLES, "omega");
 
-    // targetParticleBuffer
-    targetParticleBuffer = bufferManager.createWGPUBuffer<int32_t>(
+    targetParticleBuffer = bufferManager.createWGPUBuffer<TargetParticleCPU>(
             wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
             NUM_PARTICLES, "targetParticle");
 
@@ -409,13 +430,13 @@ void CreateRenderPipeline() {
     solverEntries[0].binding = 0;
     solverEntries[0].visibility = wgpu::ShaderStage::Compute;
     solverEntries[0].buffer.type = wgpu::BufferBindingType::Storage;
-    solverEntries[0].buffer.minBindingSize = NUM_PARTICLES_SQ * sizeof(int32_t);
+    solverEntries[0].buffer.minBindingSize = NUM_PARTICLES * sizeof(int32_t);
 
-    // cost
+    // target particles (live cost lookup)
     solverEntries[1].binding = 1;
     solverEntries[1].visibility = wgpu::ShaderStage::Compute;
     solverEntries[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-    solverEntries[1].buffer.minBindingSize = NUM_PARTICLES_SQ * sizeof(int32_t);
+    solverEntries[1].buffer.minBindingSize = NUM_PARTICLES * sizeof(TargetParticleCPU);
 
     // prices
     solverEntries[2].binding = 2;
@@ -464,12 +485,12 @@ void CreateRenderPipeline() {
     // binStart
     physicsEntries[3].binding = 3;
     physicsEntries[3].visibility = wgpu::ShaderStage::Compute;
-    physicsEntries[3].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+    physicsEntries[3].buffer.type = wgpu::BufferBindingType::Storage;
 
     // binEnd
     physicsEntries[4].binding = 4;
     physicsEntries[4].visibility = wgpu::ShaderStage::Compute;
-    physicsEntries[4].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+    physicsEntries[4].buffer.type = wgpu::BufferBindingType::Storage;
 
     // omega
     physicsEntries[5].binding = 5;
@@ -494,13 +515,14 @@ void CreateRenderPipeline() {
     auto physicsBGL = bufferManager.createBGL(physicsEntries, "physicsBGL");
 
     // Group: Radix Sort
-    std::array<wgpu::BindGroupLayoutEntry, 6> radixEntries;
+    std::array<wgpu::BindGroupLayoutEntry, 7> radixEntries{};
 
     for (int i = 0; i < radixEntries.size(); i++) {
         radixEntries[i].binding = i;
         radixEntries[i].visibility = wgpu::ShaderStage::Compute;
         radixEntries[i].buffer.type = wgpu::BufferBindingType::Storage;
     }
+    radixEntries[5].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
 
     auto radixBGL = bufferManager.createBGL(radixEntries, "radixBGL");
 
@@ -572,7 +594,7 @@ void CreateRenderPipeline() {
 
     // group 1 - solver
     assert(assignmentsBuffer);
-    assert(costBuffer);
+    assert(targetParticleBuffer);
     assert(pricesBuffer);
     assert(bidValueBuffer);
     assert(bidFromRowBuffer);
@@ -580,17 +602,12 @@ void CreateRenderPipeline() {
 
     std::vector<wgpu::BindGroupEntry> solverBGEntries = BufferManager::getBGEntries(
             {
-                    {assignmentsBuffer,
-                            NUM_PARTICLES_SQ},
-                    {costBuffer,
-                            NUM_PARTICLES_SQ},
-                    {pricesBuffer,
-                            NUM_PARTICLES},
-                    {bidValueBuffer,
-                            NUM_PARTICLES},
-                    {bidFromRowBuffer,
-                            NUM_PARTICLES},
-                    {ownerBuffer, NUM_PARTICLES}
+                    assignmentsBuffer,
+                    targetParticleBuffer,
+                    pricesBuffer,
+                    bidValueBuffer,
+                    bidFromRowBuffer,
+                    ownerBuffer,
             });
 
     assert(solverBGEntries.size() == solverEntries.size());
@@ -615,15 +632,21 @@ void CreateRenderPipeline() {
     assert(binEndBuffer);
     assert(outputHashBuffer);
     assert(sortIndicesBuffer);
+    assert(sortIndicesAltBuffer);
 
-    // group 2 - radix group
-    std::vector<wgpu::BindGroupEntry> radixBGEntries = BufferManager::getBGEntries(
-            {{localPrefixSumBuffer, NUM_PARTICLES},
-             {prefixBlockSumBuffer, NUM_PARTICLES},
-             {binStartBuffer,       NUM_PARTICLES},
-             {binEndBuffer,         NUM_PARTICLES},
-             {outputHashBuffer,     NUM_PARTICLES},
-             {sortIndicesBuffer,    NUM_PARTICLES}});
+    auto makeRadixBGEntries = [](const wgpu::Buffer &sortIn, const wgpu::Buffer &sortOut) {
+        return BufferManager::getBGEntries(
+                {localPrefixSumBuffer,
+                 prefixBlockSumBuffer,
+                 binStartBuffer,
+                 binEndBuffer,
+                 outputHashBuffer,
+                 sortIn,
+                 sortOut});
+    };
+
+    std::vector<wgpu::BindGroupEntry> radixBGEntries = makeRadixBGEntries(sortIndicesBuffer, sortIndicesAltBuffer);
+    std::vector<wgpu::BindGroupEntry> radixBGAltEntries = makeRadixBGEntries(sortIndicesAltBuffer, sortIndicesBuffer);
 
     assert(radixBGEntries.size() == radixEntries.size());
 
@@ -631,8 +654,13 @@ void CreateRenderPipeline() {
     radixBGDesc.layout = radixBGL;
     radixBGDesc.entryCount = radixBGEntries.size();
     radixBGDesc.entries = radixBGEntries.data();
-
     radixBG = device.CreateBindGroup(&radixBGDesc);
+
+    wgpu::BindGroupDescriptor radixBGAltDesc{};
+    radixBGAltDesc.layout = radixBGL;
+    radixBGAltDesc.entryCount = radixBGAltEntries.size();
+    radixBGAltDesc.entries = radixBGAltEntries.data();
+    radixBGAlt = device.CreateBindGroup(&radixBGAltDesc);
 
     puts("radix Group done!");
 
@@ -646,17 +674,19 @@ void CreateRenderPipeline() {
     assert(assignmentsBuffer);
     assert(targetParticleBuffer);
     assert(sortIndicesBuffer);
-    std::vector<wgpu::BindGroupEntry> physicsBGEntries = BufferManager::getBGEntries({{lambdasBuffer,     NUM_PARTICLES},
-                                                                                      {deltaPosBuffer,    NUM_PARTICLES},
-                                                                                      {posStarBuffer,     NUM_PARTICLES},
-                                                                                      {binStartBuffer,    NUM_PARTICLES},
-                                                                                      {binEndBuffer,      NUM_PARTICLES},
-                                                                                      {omegaBuffer,       NUM_PARTICLES},
-                                                                                      {assignmentsBuffer, NUM_PARTICLES},
-                                                                                      {targetParticleBuffer,
-                                                                                                          NUM_PARTICLES},
-                                                                                      {sortIndicesBuffer,
-                                                                                                          NUM_PARTICLES}});
+    std::vector<wgpu::BindGroupEntry> physicsBGEntries = BufferManager::getBGEntries(
+            {
+                    lambdasBuffer,
+                    deltaPosBuffer,
+                    posStarBuffer,
+                    binStartBuffer,
+                    binEndBuffer,
+                    omegaBuffer,
+                    assignmentsBuffer,
+                    targetParticleBuffer,
+                    sortIndicesBuffer
+            }
+    );
 
     assert(physicsBGEntries.size() == physicsEntries.size());
 
@@ -695,6 +725,7 @@ void CreateRenderPipeline() {
         // TODO: build multiple pipelines to scale epsilon
         wgpu::ConstantEntry solverConstants[] = {
                 {.key = "EPSILON", .value = eps},
+                {.key = "COST_MULTIPLIER", .value = static_cast<double>(NUM_PARTICLES * 2)},
         };
         return buildComputePipeline(
                 entrypoint,
@@ -728,13 +759,13 @@ void CreateRenderPipeline() {
     auto buildRadixComputePipeline = [&](const wgpu::StringView &entrypoint, wgpu::ShaderModule shaderModule) {
         std::vector<wgpu::ComputePipeline> out;
 
-        for (int i = 0; i < 32; i++) {
+        for (int i = 0; i < RADIX_PASS_COUNT; i++) {
             wgpu::ConstantEntry radixConstants[] = {
                     {.key = "WORKGROUP_COUNT", .value = 256},
                     {.key = "THREADS_PER_WORKGROUP", .value = 128},
                     {.key = "WORKGROUP_SIZE_X", .value = 16},
                     {.key = "WORKGROUP_SIZE_Y", .value = 8},
-                    {.key = "CURRENT_BIT", .value = static_cast<double>(i)},
+                    {.key = "CURRENT_BIT", .value = static_cast<double>(i * 2)},
             };
 
             out.emplace_back(buildComputePipeline(
@@ -748,19 +779,31 @@ void CreateRenderPipeline() {
         return out;
     };
 
+    wgpu::ConstantEntry radixScanConstants[] = {
+            {.key = "WORKGROUP_COUNT", .value = 256},
+    };
+
     puts("RADIX COMPUTE PIPELINE");
 
     // solver
-    solverBiddingPipeline = buildSolverComputePipeline("auctionBiddingPhase");
-    solverUpdatePipeline = buildSolverComputePipeline("auctionUpdatePhase");
-    solverInitPipeline = buildSolverComputePipeline("auctionInit");
+    solverBiddingPipeline = buildSolverComputePipeline("auctionBiddingPhase", AUCTION_EPSILON);
+    solverUpdatePipeline = buildSolverComputePipeline("auctionUpdatePhase", AUCTION_EPSILON);
+    solverInitPipeline = buildSolverComputePipeline("auctionInit", AUCTION_EPSILON);
 
     // radix
     radixSortPipelines = buildRadixComputePipeline("radix_sort", radixSortShaderModule);
     radixReorderPipelines = buildRadixComputePipeline("radix_sort_reorder", radixReorderShaderModule);
+    radixScanPipeline = buildComputePipeline(
+            "radixScanBlockSums",
+            radixScanShaderModule,
+            radixPipelineLayout,
+            radixScanConstants
+    );
 
     // pbf
     physicsExternalForcesPipeline = buildPhysicsComputePipeline("pbfExternalForces");
+    physicsClearBinsPipeline = buildPhysicsComputePipeline("clearSpatialBins");
+    physicsBuildBinsPipeline = buildPhysicsComputePipeline("buildSpatialBins");
     physicsSolverOnePipeline = buildPhysicsComputePipeline("pbfSolverPass");
     physicsSolverTwoPipeline = buildPhysicsComputePipeline("pbfSolverPassTwo");
     physicsSolverThreePipeline = buildPhysicsComputePipeline("pbfSolverPassThree");
@@ -802,28 +845,32 @@ void CreateRenderPipeline() {
 
     queue.WriteBuffer(paramsBuffer, 0, &params, sizeof(params));
 
-    cout << cost_buffer.size() << " " << endl;
-    WATCH(NUM_PARTICLES_SQ);
-    assert(cost_buffer.size() == NUM_PARTICLES_SQ);
+    bufferManager.fillVal(assignmentsBuffer, NUM_PARTICLES, -1);
 
     queue.WriteBuffer(
-            costBuffer,
+            targetParticleBuffer,
             0,
-            cost_buffer.data(),
-            cost_buffer.size() * sizeof(COST_ITEM_T)
+            targetParticleCPUData.data(),
+            targetParticleCPUData.size() * sizeof(TargetParticleCPU)
     );
 
     bufferManager.fillZero(pricesBuffer, NUM_PARTICLES);
     bufferManager.fillZero(bidValueBuffer, NUM_PARTICLES);
     bufferManager.fillVal(bidFromRowBuffer, NUM_PARTICLES, -1);
 
-    std::vector<int32_t> indices(NUM_PARTICLES);
-    std::iota(indices.begin(), indices.end(), 0);
+    std::vector<uint32_t> indices(NUM_PARTICLES);
+    std::iota(indices.begin(), indices.end(), 0u);
     queue.WriteBuffer(
             sortIndicesBuffer,
             0,
             indices.data(),
-            indices.size() * sizeof(int32_t)
+            indices.size() * sizeof(uint32_t)
+    );
+    queue.WriteBuffer(
+            sortIndicesAltBuffer,
+            0,
+            indices.data(),
+            indices.size() * sizeof(uint32_t)
     );
 
     bufferManager.fillZero(ownerBuffer, NUM_PARTICLES);
@@ -831,37 +878,26 @@ void CreateRenderPipeline() {
     // not mapping for now since I want to preserve order of binding args to make sure I don't miss anything
     // radix
     bufferManager.fillZero(localPrefixSumBuffer, NUM_PARTICLES);
-    bufferManager.fillZero(prefixBlockSumBuffer, NUM_PARTICLES);
-    bufferManager.fillZero(binStartBuffer, NUM_PARTICLES);
-    bufferManager.fillZero(binEndBuffer, NUM_PARTICLES);
+    bufferManager.fillZero(prefixBlockSumBuffer, 4 * kRadixWorkgroupCount);
+    bufferManager.fillVal(binStartBuffer, NUM_BINS, NUM_PARTICLES);
+    bufferManager.fillZero(binEndBuffer, NUM_BINS);
     bufferManager.fillZero(outputHashBuffer, NUM_PARTICLES);
 
     // physics
     bufferManager.fillZero(lambdasBuffer, NUM_PARTICLES);
-    bufferManager.fillZero(deltaPosBuffer, NUM_PARTICLES);
-    bufferManager.fillZero(posStarBuffer, NUM_PARTICLES);
-    bufferManager.fillZero(binStartBuffer, NUM_PARTICLES);
-    bufferManager.fillZero(binEndBuffer, NUM_PARTICLES);
+    bufferManager.fillZeroBytes(deltaPosBuffer, NUM_PARTICLES * sizeof(vec2<float>));
+    bufferManager.fillZeroBytes(posStarBuffer, NUM_PARTICLES * sizeof(vec2<float>));
     bufferManager.fillZero(omegaBuffer, NUM_PARTICLES);
-    queue.WriteBuffer(
-            targetParticleBuffer,
-            0,
-            targetParticleCPUData.data(),
-            targetParticleCPUData.size()
-    );
 
-    queue.WriteBuffer(
-            sortIndicesBuffer,
-            0,
-            indices.data(),
-            NUM_PARTICLES * sizeof(int32_t)
-    );
-
-    assert(NUM_PARTICLES == particleCPUData.size());
+    assert(NUM_PARTICLES == static_cast<int32_t>(particleCPUData.size()));
 
     encoder = device.CreateCommandEncoder();
-    // solver init
     solverComputePass(solverInitPipeline);
+    const int32_t initAuctionIters = std::min(NUM_PARTICLES, 16);
+    for (int32_t i = 0; i < initAuctionIters; ++i) {
+        solverComputePass(solverBiddingPipeline);
+        solverComputePass(solverUpdatePipeline);
+    }
 
     wgpu::CommandBuffer initCommands = encoder.Finish();
     queue.Submit(1, &initCommands);
@@ -888,15 +924,47 @@ void Render() {
 
     // Compute
     encoder = device.CreateCommandEncoder();
-    // Step 1: Single iteration of auction phase
-    solverComputePass(solverBiddingPipeline);
-    solverComputePass(solverUpdatePipeline);
+    // Step 1: Auction solver (multiple Jacobi rounds per frame for convergence)
+    for (int32_t i = 0; i < AUCTION_ITERS_PER_FRAME; ++i) {
+        solverComputePass(solverBiddingPipeline);
+        solverComputePass(solverUpdatePipeline);
+    }
 
     // Step 2: PBF External Forces
     physicsComputePass(physicsExternalForcesPipeline);
-    // Step 3: radix sort
-    radixComputePass(radixSortPipelines);
-    radixComputePass(radixReorderPipelines);
+
+    // Step 3: radix sort (interleaved sort -> scan -> reorder per bit pass)
+    bool pingPong = false;
+    for (int32_t i = 0; i < RADIX_PASS_COUNT; i++) {
+        wgpu::BindGroup radixBindGroup = pingPong ? radixBGAlt : radixBG;
+
+        auto sortPass = encoder.BeginComputePass();
+        sortPass.SetPipeline(radixSortPipelines[i]);
+        sortPass.SetBindGroup(0, globalComputeBG);
+        sortPass.SetBindGroup(1, radixBindGroup);
+        sortPass.DispatchWorkgroups(256);
+        sortPass.End();
+
+        auto scanPass = encoder.BeginComputePass();
+        scanPass.SetPipeline(radixScanPipeline);
+        scanPass.SetBindGroup(0, globalComputeBG);
+        scanPass.SetBindGroup(1, radixBindGroup);
+        scanPass.DispatchWorkgroups(1);
+        scanPass.End();
+
+        auto reorderPass = encoder.BeginComputePass();
+        reorderPass.SetPipeline(radixReorderPipelines[i]);
+        reorderPass.SetBindGroup(0, globalComputeBG);
+        reorderPass.SetBindGroup(1, radixBindGroup);
+        reorderPass.DispatchWorkgroups(256);
+        reorderPass.End();
+
+        pingPong = !pingPong;
+    }
+
+    physicsComputePass(physicsClearBinsPipeline);
+    physicsComputePass(physicsBuildBinsPipeline);
+
     // Step 4: Continue rest of PBF
     physicsComputePass(physicsSolverOnePipeline);
     physicsComputePass(physicsSolverTwoPipeline);
@@ -912,7 +980,7 @@ void Render() {
 
     pass.DrawIndexed(
             6,
-            particleCPUData.size(),
+            static_cast<uint32_t>(NUM_PARTICLES),
             0,
             0,
             0
@@ -924,7 +992,7 @@ void Render() {
     queue.Submit(1, &commands);
 }
 
-void Simulate(uint16_t dim = 100) {
+void Simulate(uint16_t dim = 32) {
     // main - so can expose args to emscripten
     setDim(dim);
     Init();

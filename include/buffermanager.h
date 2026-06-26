@@ -10,6 +10,9 @@
 #include <type_traits>
 
 #include <span>
+#include <algorithm>
+#include <array>
+#include <cstring>
 
 struct BGLEntryParams {
     BGLEntryParams(wgpu::ShaderStage visibility, wgpu::BufferBindingType bufferType, uint64_t minBindingSize)
@@ -70,36 +73,41 @@ public:
         return device_.CreateBuffer(&bufDesc);
     }
 
+    void fillZeroBytes(wgpu::Buffer &buf, size_t byteSize) {
+        constexpr size_t kChunkBytes = 65536;
+        std::array<uint8_t, kChunkBytes> zeros{};
+        size_t offset = 0;
+        while (offset < byteSize) {
+            const size_t chunk = std::min(kChunkBytes, byteSize - offset);
+            queue_.WriteBuffer(buf, offset, zeros.data(), chunk);
+            offset += chunk;
+        }
+    }
+
     template<std::integral T = int>
     void fillVal(wgpu::Buffer &buf, size_t N, T val) {
-        // this should probably be outside class in a namespace
-        queue_.WriteBuffer(
-                buf,
-                0,
-                std::vector<T>(N, val).data(),
-                N * sizeof(T)
-        );
+        constexpr size_t kMaxChunk = 16384;
+        const size_t chunkCount = std::min(N, kMaxChunk);
+        const std::vector<T> chunk(chunkCount, val);
+        size_t written = 0;
+        while (written < N) {
+            const size_t count = std::min(N - written, chunk.size());
+            queue_.WriteBuffer(buf, written * sizeof(T), chunk.data(), count * sizeof(T));
+            written += count;
+        }
     }
 
     template<std::integral T = int>
     void fillZero(wgpu::Buffer &buf, size_t N) {
-        // this should probably be outside class in a namespace
-        queue_.WriteBuffer(
-                buf,
-                0,
-                std::vector<T>(N, 0).data(),
-                N * sizeof(T)
-        );
+        fillVal(buf, N, T{0});
     }
 
-    using BufferInfo = std::pair<wgpu::Buffer, size_t>;
-
     static std::vector<wgpu::BindGroupEntry>
-    getBGEntries(std::initializer_list<BufferInfo> args) {
+    getBGEntries(std::initializer_list<wgpu::Buffer> args) {
         std::vector<wgpu::BindGroupEntry> bgEntries(args.size());
 
         size_t i = 0;
-        for (auto const &[buffer, size]: args) {
+        for (auto const &buffer: args) {
             bgEntries[i].binding = i;
             bgEntries[i].buffer = buffer;
             bgEntries[i].offset = 0;

@@ -16,7 +16,8 @@ struct Particle {
 };
 
 struct TargetPos {
-    position: vec2f
+    position: vec2f,
+    color: vec4f,
 }
 
 // minimal redundancy overhead
@@ -39,8 +40,8 @@ struct Params {
 @group(1) @binding(0) var<storage, read_write> lambdas: array<f32>;
 @group(1) @binding(1) var<storage, read_write> deltaPos: array<vec2f>;
 @group(1) @binding(2) var<storage, read_write> posStar: array<vec2f>;           // predicted positions
-@group(1) @binding(3) var<storage, read> binStart: array<i32>;
-@group(1) @binding(4) var<storage, read> binEnd: array<i32>;
+@group(1) @binding(3) var<storage, read_write> binStart: array<u32>;
+@group(1) @binding(4) var<storage, read_write> binEnd: array<u32>;
 @group(1) @binding(5) var<storage, read_write> omega: array<f32>;          // memoize for vorticity confinement
 // solver
 @group(1) @binding(6) var<storage, read> assignments: array<i32>;
@@ -67,6 +68,8 @@ fn pbfExternalForces(@builtin(global_invocation_id) gid: vec3<u32>) {
     // this doesn't utilize sorted indices bc no neighborhood search
     let idx = gid.x;
     let n = params.size;
+
+    if (idx >= n) {return;}
 
     let dt = params.dt;
     let H = params.H;
@@ -95,8 +98,49 @@ fn pbfExternalForces(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     posStar[idx] = pos + vel * dt;
-    // For radix - possibly redundant but I don't want to rebind everything
     particles[idx].position = posStar[idx];
+}
+
+@compute @workgroup_size(TILE_SIZE)
+fn clearSpatialBins(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= params.numBins) {
+        return;
+    }
+    binStart[idx] = params.size;
+    binEnd[idx] = 0u;
+}
+
+@compute @workgroup_size(TILE_SIZE)
+fn buildSpatialBins(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let n = params.size;
+    if (idx >= n) {
+        return;
+    }
+
+    let pIdx = sortIndices[idx];
+    let bin = hashCoords(posStar[pIdx]);
+
+    if (idx == 0u) {
+        binStart[bin] = 0u;
+    } else {
+        let prev_p = sortIndices[idx - 1u];
+        let prev_bin = hashCoords(posStar[prev_p]);
+        if (bin != prev_bin) {
+            binStart[bin] = idx;
+        }
+    }
+
+    if (idx == n - 1u) {
+        binEnd[bin] = n;
+    } else {
+        let next_p = sortIndices[idx + 1u];
+        let next_bin = hashCoords(posStar[next_p]);
+        if (bin != next_bin) {
+            binEnd[bin] = idx + 1u;
+        }
+    }
 }
 
 @compute @workgroup_size(TILE_SIZE)
@@ -134,7 +178,7 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
             let end = binEnd[nb];
 
             // iterate over neighbors
-            for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
+            for (var jIdx: u32 = start; jIdx < end; jIdx++) {
                 if (jIdx == idx) {continue;}
                 let pjIdx = sortIndices[jIdx];
 
@@ -142,7 +186,6 @@ fn pbfSolverPass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let r = pos - neiPos;
                 let dist = length(r);
 
-                // avoid obvious 0
                 if (dist > H || dist < 0.0001) { continue; }
                 let q = dist / H;
                 var w: f32 = 0.0;
@@ -179,8 +222,7 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (idx >= n) {return;}
     let pIdx = sortIndices[idx];
-    // TODO: check if i should set pos to pos or posStar
-    let pos = particles[pIdx].position;
+    let pos = posStar[pIdx];
 
     let dt = params.dt;
     let H = params.H;
@@ -204,7 +246,7 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
             let start = binStart[nb];
             let end = binEnd[nb];
 
-            for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
+            for (var jIdx: u32 = start; jIdx < end; jIdx++) {
                 if (jIdx == idx) {continue;}
                 let pjIdx = sortIndices[jIdx];
 
@@ -216,8 +258,6 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let q = dist/H;
                 var w: f32 = 0.0;
                 var dw: f32 = 0.0;
-
-                // kernel
                 if (q < 1.0) {
                     w = 2.0/3.0 - q*q + 0.5 * q*q*q;
                     dw = -3.0 * q + 2.25 * q*q;
@@ -246,31 +286,22 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // skip collision detection + response - no solids
 
-    // Position correction + velocity update
-    posStar[pIdx] = posStar[pIdx] + deltaPos[pIdx];
+    posStar[pIdx] = pos + deltaPos[pIdx];
+    particles[pIdx].velocity = (posStar[pIdx] - pos) / dt;
 
-    let newVel = (posStar[pIdx] - pos) / dt;
-    particles[pIdx].velocity = newVel;
-
-    // XSPH viscosity
     var omega_i: f32 = 0;
-    // for vorticity
-    var f_vorticity = vec2(0,0);
 
     for (var dx: i32 = -1; dx <= 1; dx++) {
         for (var dy: i32 = -1; dy <= 1; dy++) {
             let posPrime = vec2(pos.x+f32(dx)*cellSize, pos.y+f32(dy)*cellSize);
             if (min(posPrime.x, posPrime.y) < -1 || max(posPrime.x, posPrime.y) > 1) {
-                // OOB, no clamp
                 continue;
             }
             let nb = hashCoords(posPrime);
             let start = binStart[nb];
             let end = binEnd[nb];
 
-            // iterate over neighbors
-            for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
-                if (jIdx == idx) {continue;}
+            for (var jIdx: u32 = start; jIdx < end; jIdx++) {
                 if (jIdx == idx) {continue;}
                 let pjIdx = sortIndices[jIdx];
 
@@ -279,10 +310,7 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let dist = length(r);
                 if (dist > H || dist < 0.0001) {continue;}
 
-                // diff in velocity between particle and neighbor
                 let v_ij = particles[pjIdx].velocity - particles[pIdx].velocity;
-
-                // gradient cubic spline kernel
 
                 let q = dist/H;
                 var dw: f32 = 0;
@@ -299,10 +327,10 @@ fn pbfSolverPassTwo(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let grad = scale * r;
 
                 omega_i += v_ij.x * grad.y - v_ij.y * grad.x;
-            } // end neighbor search
-            omega[pIdx] = omega_i;
+            }
         }
     }
+    omega[pIdx] = omega_i;
 }
 @compute @workgroup_size(TILE_SIZE)
 fn pbfSolverPassThree(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -311,8 +339,7 @@ fn pbfSolverPassThree(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (idx >= n) {return;}
     let pIdx = sortIndices[idx];
-    // TODO: check if i should set pos to pos or posStar
-    let pos = particles[pIdx].position;
+    let pos = posStar[pIdx];
 
     let dt = params.dt;
     let H = params.H;
@@ -338,8 +365,7 @@ fn pbfSolverPassThree(@builtin(global_invocation_id) gid: vec3<u32>) {
             let end = binEnd[nb];
 
             // another loop for vorticity
-            for (var jIdx: u32 = u32(start); jIdx < u32(end); jIdx++) {
-                if (jIdx == idx) {continue;}
+            for (var jIdx: u32 = start; jIdx < end; jIdx++) {
                 if (jIdx == idx) {continue;}
                 let pjIdx = sortIndices[jIdx];
 
@@ -350,7 +376,6 @@ fn pbfSolverPassThree(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 let v_ij = particles[pjIdx].velocity - particles[pIdx].velocity;
 
-                // gradient cubic spline kernel
                 var q = dist/H;
                 var dw: f32 = 0;
 
@@ -365,27 +390,21 @@ fn pbfSolverPassThree(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let scale = dw / (H * q);
                 let grad = scale * r;
 
-                // XSPH viscosity in same loop
                 viscosity_sum += v_ij * grad;
-
-                // since in 2D, we modify the math a little
-                // eta for location vector
-                // TODO: check for correctness
                 eta += ((abs(omega[pIdx]) - abs(omega[pjIdx])) / (rho0 + eps)) * grad;
-            } // end neighbor search for bin
+            }
         }
-    } // end neighbor bin accumulation
-    // viscosity velocity update
+    }
+
     particles[pIdx].velocity += C * viscosity_sum;
 
-    // cross product with scalar on RHS here intuitively becomes 90 degrees CCW by right-hand-rule
-    // perp vector: (-Ny, Nx)
-    eta = eta / length(eta);
-    let f_vorticity = eps * omega[pIdx] * vec2(-eta.y,eta.x);
+    let eta_len = length(eta);
+    if (eta_len > eps) {
+        eta = eta / eta_len;
+        let f_vorticity = eps * omega[pIdx] * vec2(-eta.y, eta.x);
+        particles[pIdx].velocity += dt * f_vorticity;
+    }
 
-    particles[pIdx].velocity += dt * f_vorticity;
-
-    // euler step position
-    particles[pIdx].position += particles[pIdx].velocity * dt;
+    particles[pIdx].position = pos + particles[pIdx].velocity * dt;
     posStar[pIdx] = particles[pIdx].position;
 }
