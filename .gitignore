@@ -1,11 +1,11 @@
 .idea/
+.vscode/
 build/
 
 cmake-build-debug/
 cmake-build-emscriptendebug/
 cmake-build-release/
 
-*.txt
 tmp.*
 *.html
 
