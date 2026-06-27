@@ -67,6 +67,7 @@ struct ParticleCPU {
 //    float color[4];
 };
 
+// Must match WGSL TargetParticle / TargetPos: vec2f position + 8-byte pad + vec4f color (32 bytes).
 struct TargetParticleCPU {
     explicit TargetParticleCPU(std::array<float, 2> pos) : x(pos[0]), y(pos[1]) {};
 
@@ -76,8 +77,12 @@ struct TargetParticleCPU {
             : x(x), y(y), r(color[0]), g(color[1]), b(color[2]), a(color[3]) {};
 
     float x, y;
+    float _wgpu_pad[2]{};
     float r{}, g{}, b{}, a{};
 };
+
+static_assert(sizeof(TargetParticleCPU) == 32);
+static_assert(sizeof(ParticleCPU) == 32);
 
 
 // https://www.cg.tuwien.ac.at/research/publications/2023/PETER-2023-PSW/PETER-2023-PSW-.pdf

@@ -18,11 +18,13 @@ struct Params {
     solverIterations: u32,
     cellSize: f32,
     numBins: u32,
+    frameCount: u32,
 }
 
 // Global BG
 @group(0) @binding(0) var<storage, read_write> inputParticles: array<Particle>;
 @group(0) @binding(1) var<uniform> params : Params;
+@group(0) @binding(2) var<storage, read> posStar: array<vec2f>;
 
 // Radix BG
 @group(1) @binding(0) var<storage, read_write> local_prefix_sums: array<u32>; // sort hashes
@@ -67,7 +69,7 @@ fn radix_sort(
 
     // Argsort: thread gid processes the particle currently at sorted slot gid
     let particle_idx = sortIndices[GID];
-    let elm = select(hashCoords(inputParticles[particle_idx].position), 0, GID >= size);
+    let elm = select(hashCoords(posStar[particle_idx]), 0, GID >= size);
     let extract_bits: u32 = (elm >> CURRENT_BIT) & 0x3;
 
     var bit_prefix_sums = array<u32, 4>(0, 0, 0, 0);

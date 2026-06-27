@@ -1,6 +1,6 @@
 // naive particle shader (adapted to BG)
 // abstract-float
-const particle_size = 0.088;
+const particle_size = 0.1;
 
 struct Particle {
     position: vec2f,
@@ -17,6 +17,7 @@ struct Params {
     solverIterations: u32,
     cellSize: f32,
     numBins: u32,
+    frameCount: u32,
 }
 
 struct VertexInput {

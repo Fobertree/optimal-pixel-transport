@@ -3,6 +3,7 @@
 
 @group(0) @binding(0) var<storage, read_write> inputParticles: array<Particle>;
 @group(0) @binding(1) var<uniform> params : Params;
+@group(0) @binding(2) var<storage, read> posStar: array<vec2f>;
 
 @group(1) @binding(0) var<storage, read_write> local_prefix_sum: array<u32>;
 @group(1) @binding(1) var<storage, read_write> prefix_block_sum: array<u32>;
@@ -25,6 +26,7 @@ struct Params {
     solverIterations: u32,
     cellSize: f32,
     numBins: u32,
+    frameCount: u32,
 }
 
 struct Particle {
@@ -66,7 +68,7 @@ fn radix_sort_reorder(
 
     if (GID < size) {
         let particle_idx = sortIndicesIn[GID];
-        let k = hashCoords(inputParticles[particle_idx].position);
+        let k = hashCoords(posStar[particle_idx]);
 
         let local_prefix = local_prefix_sum[GID];
 

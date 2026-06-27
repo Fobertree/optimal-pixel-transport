@@ -23,12 +23,13 @@
 #include "buffermanager.h"
 #include "particle.h"
 #include "particle_buffer.h"
+#include "solver.h"
 #include "consts.h"
 
 #define WATCH(x) (std::cout << #x << " = " << (x) << std::endl)
 
 // tmp spaghetti var bc gcc doesn't detect changes/re-compile on wgsl-only changes
-bool bob = true;
+bool bob = false;
 
 template<typename T>
 using vec2 = std::array<T, 2>;
@@ -38,7 +39,6 @@ wgpu::Adapter adapter;
 wgpu::Device device;
 wgpu::Surface surface; // similar to html canvas
 wgpu::TextureFormat format;
-wgpu::RenderPipeline pipeline;
 
 wgpu::Queue queue;
 
@@ -46,14 +46,10 @@ wgpu::Buffer indexBuffer;
 // global
 wgpu::Buffer particleBuffer;
 wgpu::Buffer paramsBuffer;
-// solver
+// assignments (CPU Hungarian → GPU physics)
 wgpu::Buffer assignmentsBuffer;
-wgpu::Buffer pricesBuffer;
-wgpu::Buffer bidValueBuffer;
-wgpu::Buffer bidFromRowBuffer;
 wgpu::Buffer sortIndicesBuffer;
 wgpu::Buffer sortIndicesAltBuffer;
-wgpu::Buffer ownerBuffer;
 // pbf
 wgpu::Buffer lambdasBuffer;
 wgpu::Buffer deltaPosBuffer;
@@ -67,18 +63,14 @@ wgpu::Buffer localPrefixSumBuffer;
 wgpu::Buffer prefixBlockSumBuffer;
 wgpu::Buffer outputHashBuffer;
 
-wgpu::ComputePipeline solverBiddingPipeline, solverUpdatePipeline, solverInitPipeline, solverSyncPipeline,
-        solverRepairPipeline;
-wgpu::ComputePipeline solverBiddingConvergePipeline, solverUpdateConvergePipeline, solverRepairConvergePipeline;
-bool g_matchingConverged = false;
-int32_t g_convergeFramesLeft = 0;
 std::vector<wgpu::ComputePipeline> radixSortPipelines, radixReorderPipelines;
 wgpu::ComputePipeline radixScanPipeline;
 wgpu::ComputePipeline physicsExternalForcesPipeline, physicsClearBinsPipeline, physicsBuildBinsPipeline;
 wgpu::ComputePipeline physicsSolverOnePipeline, physicsSolverTwoPipeline, physicsSolverThreePipeline;
+wgpu::ComputePipeline physicsAssignmentTransportPipeline;
 wgpu::RenderPipeline renderPipeline;
 
-wgpu::BindGroup globalComputeBG, globalRenderBG, solverBG, physicsBG, radixBG, radixBGAlt;
+wgpu::BindGroup globalComputeBG, globalRadixBG, globalRenderBG, physicsBG, radixBG, radixBGAlt;
 
 BufferManager bufferManager;
 
@@ -99,16 +91,19 @@ struct Params {
     uint32_t solverIterations;
     float cellSize;
     uint32_t numBins;
+    uint32_t frameCount;
 };
+
+Params g_simParams{};
+uint32_t g_frameCount = 0;
 
 int32_t DIM, NUM_PARTICLES;
 uint32_t NUM_BINS;
 uint32_t RADIX_WORKGROUP_COUNT;
 int32_t RADIX_PASS_COUNT;
 uint32_t COMPUTE_WORKGROUPS;
-int32_t AUCTION_ITERS_PER_FRAME;
-int32_t AUCTION_EPSILON;
-int32_t AUCTION_CANDIDATE_RADIUS;
+
+#if defined(__EMSCRIPTEN__)
 
 EM_BOOL frame_callback(double time, void *userData) {
     static double last_time = 0.0;
@@ -128,39 +123,7 @@ EM_BOOL frame_callback(double time, void *userData) {
     return EM_TRUE;
 }
 
-[[nodiscard]] int32_t auctionIterationsPerFrame(int32_t gridDim, int32_t candidateRadius) {
-    (void) gridDim;
-    (void) candidateRadius;
-    return 8;
-}
-
-[[nodiscard]] int32_t auctionEpsilon(int32_t numParticles) {
-    // Integer costs with min gap 1 (tiebreak). Bertsekas: ε ∈ (0, min_cost_gap] for convergence;
-    // ε ≤ 1/n for ε-optimal matching. Use 1 — safe since rgb gaps >> n for typical grids.
-    (void) numParticles;
-    return 1;
-}
-
-[[nodiscard]] int32_t auctionCandidateRadius(int32_t gridDim) {
-    // R >= GRID_DIM enables full scan (required for RGB matching across the whole image).
-    return gridDim * 2;
-}
-
-[[nodiscard]] int32_t auctionInitIterations(int32_t numParticles) {
-    return std::clamp(numParticles * 4, 256, 4096);
-}
-
-[[nodiscard]] int32_t auctionRepairRounds(int32_t numParticles) {
-    return std::clamp(numParticles / 4, 16, 64);
-}
-
-[[nodiscard]] int32_t auctionRepairRoundsPerFrame() {
-    return 4;
-}
-
-[[nodiscard]] int32_t auctionConvergenceFrames(int32_t numParticles) {
-    return std::clamp(numParticles / 2, 30, 180);
-}
+#endif
 
 [[nodiscard]] uint32_t radixWorkgroupsForParticles(int32_t numParticles) {
     constexpr uint32_t kThreadsPerRadixWg = 128u;
@@ -173,9 +136,39 @@ EM_BOOL frame_callback(double time, void *userData) {
 
 void updateDispatchConstants() {
     COMPUTE_WORKGROUPS = (static_cast<uint32_t>(NUM_PARTICLES) + kTileSize - 1u) / kTileSize;
-    AUCTION_CANDIDATE_RADIUS = auctionCandidateRadius(DIM);
-    AUCTION_ITERS_PER_FRAME = auctionIterationsPerFrame(DIM, AUCTION_CANDIDATE_RADIUS);
-    AUCTION_EPSILON = auctionEpsilon(NUM_PARTICLES);
+}
+
+[[nodiscard]] float estimateRestDensity(int32_t dim, float H) {
+    const float spacing = 1.5f / static_cast<float>(dim);
+    float rho = 2.f / 3.f;
+    const int maxSteps = static_cast<int>(std::ceil(2.f * H / spacing)) + 1;
+    for (int di = -maxSteps; di <= maxSteps; ++di) {
+        for (int dj = -maxSteps; dj <= maxSteps; ++dj) {
+            if (di == 0 && dj == 0) {
+                continue;
+            }
+            const float dist = std::hypot(static_cast<float>(di) * spacing,
+                                          static_cast<float>(dj) * spacing);
+            if (dist < 1e-4f || dist > H) {
+                continue;
+            }
+            const float q = dist / H;
+            float w = 0.f;
+            if (q < 1.f) {
+                w = 2.f / 3.f - q * q + 0.5f * q * q * q;
+            } else if (q < 2.f) {
+                w = (1.f / 6.f) * std::pow(2.f - q, 3.f);
+            }
+            rho += w;
+        }
+    }
+    return rho;
+}
+
+[[nodiscard]] float morphRampCpu(uint32_t frameCount) {
+    constexpr float kMorphRampFrames = 120.f;
+    const float t = std::min(1.f, static_cast<float>(frameCount) / kMorphRampFrames);
+    return t * t;
 }
 
 [[nodiscard]] int32_t radixPassesForBins(uint32_t numBins) {
@@ -195,38 +188,39 @@ void updateDispatchConstants() {
     return passes;
 }
 
-auto solverComputePass = [](const wgpu::ComputePipeline &pipeline) {
-    auto pass = encoder.BeginComputePass();
-    pass.SetPipeline(pipeline);
-    pass.SetBindGroup(0, globalComputeBG);
-    pass.SetBindGroup(1, solverBG);
-    pass.DispatchWorkgroups(COMPUTE_WORKGROUPS);
-    pass.End();
-};
-
-auto solverConvergePass = [](int32_t repairRounds, const wgpu::ComputePipeline &repairPipeline) {
-    for (int32_t i = 0; i < repairRounds; ++i) {
-        solverComputePass(solverSyncPipeline);
-        solverComputePass(repairPipeline);
-    }
-};
-
-auto runAuctionRounds = [](int32_t rounds, const wgpu::ComputePipeline &bidding,
-                           const wgpu::ComputePipeline &update) {
-    for (int32_t i = 0; i < rounds; ++i) {
-        solverComputePass(bidding);
-        solverComputePass(update);
-    }
-};
-
-auto physicsComputePass = [](const wgpu::ComputePipeline &pipeline) {
-    auto pass = encoder.BeginComputePass();
+void physicsDispatch(wgpu::ComputePassEncoder &pass, const wgpu::ComputePipeline &pipeline) {
     pass.SetPipeline(pipeline);
     pass.SetBindGroup(0, globalComputeBG);
     pass.SetBindGroup(1, physicsBG);
     pass.DispatchWorkgroups(COMPUTE_WORKGROUPS);
-    pass.End();
-};
+}
+
+void radixSortAndBuildBins(wgpu::ComputePassEncoder &pass) {
+    bool pingPong = false;
+    for (int32_t i = 0; i < RADIX_PASS_COUNT; i++) {
+        wgpu::BindGroup radixBindGroup = pingPong ? radixBGAlt : radixBG;
+
+        pass.SetPipeline(radixSortPipelines[i]);
+        pass.SetBindGroup(0, globalRadixBG);
+        pass.SetBindGroup(1, radixBindGroup);
+        pass.DispatchWorkgroups(RADIX_WORKGROUP_COUNT);
+
+        pass.SetPipeline(radixScanPipeline);
+        pass.SetBindGroup(0, globalRadixBG);
+        pass.SetBindGroup(1, radixBindGroup);
+        pass.DispatchWorkgroups(1);
+
+        pass.SetPipeline(radixReorderPipelines[i]);
+        pass.SetBindGroup(0, globalRadixBG);
+        pass.SetBindGroup(1, radixBindGroup);
+        pass.DispatchWorkgroups(RADIX_WORKGROUP_COUNT);
+
+        pingPong = !pingPong;
+    }
+
+    physicsDispatch(pass, physicsClearBinsPipeline);
+    physicsDispatch(pass, physicsBuildBinsPipeline);
+}
 
 void setDim(uint16_t dim) {
     DIM = dim;
@@ -236,9 +230,6 @@ void setDim(uint16_t dim) {
     WATCH(DIM);
     WATCH(NUM_PARTICLES);
     WATCH(COMPUTE_WORKGROUPS);
-    WATCH(AUCTION_ITERS_PER_FRAME);
-    WATCH(AUCTION_EPSILON);
-    WATCH(AUCTION_CANDIDATE_RADIUS);
 }
 
 void Start() {
@@ -337,6 +328,42 @@ void Init() {
     bufferManager = BufferManager(device, queue);
 }
 
+void EncodeRenderPass(wgpu::CommandEncoder &enc) {
+    wgpu::SurfaceTexture surfaceTexture;
+    surface.GetCurrentTexture(&surfaceTexture);
+
+    wgpu::RenderPassColorAttachment attachment{
+            .view = surfaceTexture.texture.CreateView(),
+            .loadOp = wgpu::LoadOp::Clear,
+            .storeOp = wgpu::StoreOp::Store
+    };
+
+    wgpu::RenderPassDescriptor renderpassDesc{
+            .colorAttachmentCount = 1,
+            .colorAttachments = &attachment
+    };
+
+    wgpu::RenderPassEncoder pass = enc.BeginRenderPass(&renderpassDesc);
+    pass.SetPipeline(renderPipeline);
+    pass.SetIndexBuffer(indexBuffer, wgpu::IndexFormat::Uint16);
+    pass.SetBindGroup(0, globalRenderBG);
+    pass.DrawIndexed(
+            6,
+            static_cast<uint32_t>(NUM_PARTICLES),
+            0,
+            0,
+            0
+    );
+    pass.End();
+}
+
+void SubmitRenderPass() {
+    wgpu::CommandEncoder enc = device.CreateCommandEncoder();
+    EncodeRenderPass(enc);
+    wgpu::CommandBuffer commands = enc.Finish();
+    queue.Submit(1, &commands);
+}
+
 void ConfigureSurface() {
     wgpu::SurfaceCapabilities capabilities;
     surface.GetCapabilities(adapter, &capabilities);
@@ -353,21 +380,26 @@ void ConfigureSurface() {
 }
 
 void CreateRenderPipeline() {
-    auto particleCPUData = loadSourceParticlesFromImage("img_1.png", DIM, DIM);
-    auto targetParticleCPUData = loadTargetParticlesFromImage("img_6.png", DIM, DIM);
+    constexpr const char *kSourceImage = "img_1.png";
+    constexpr const char *kTargetImage = "img_6.png";
+
+    auto particleCPUData = loadSourceParticlesFromImage(kSourceImage, DIM, DIM);
 
     RADIX_WORKGROUP_COUNT = radixWorkgroupsForParticles(NUM_PARTICLES);
     NUM_BINS = spatialBinsForParticles(NUM_PARTICLES);
     RADIX_PASS_COUNT = radixPassesForBins(NUM_BINS);
 
     constexpr float H = 0.1f;
-    Params params{.size = NUM_PARTICLES,
-            .rho0 = 0.5f,
+    const float rho0 = estimateRestDensity(DIM, H);
+    WATCH(rho0);
+    g_simParams = Params{.size = NUM_PARTICLES,
+            .rho0 = rho0,
             .H = H,
-            .dt = 1.f / 60.f,
-            .solverIterations = 0,
+            .dt = 1.f / 120.f,
+            .solverIterations = 2,
             .cellSize = H,
             .numBins = NUM_BINS,
+            .frameCount = 0,
     };
 
     /* Load Shader Modules */
@@ -379,7 +411,6 @@ void CreateRenderPipeline() {
         return device.CreateShaderModule(&shaderModuleDescriptor);
     };
 
-    wgpu::ShaderModule solverShaderModule = getShaderModule("Solver/auction.wgsl");
     wgpu::ShaderModule radixSortShaderModule = getShaderModule("Sort/radix.wgsl");
     wgpu::ShaderModule radixReorderShaderModule = getShaderModule("Sort/radix_reorder.wgsl");
     wgpu::ShaderModule radixScanShaderModule = getShaderModule("Sort/radix_scan.wgsl");
@@ -408,23 +439,8 @@ void CreateRenderPipeline() {
 
     cout << "GLOBALS" << endl;
 
-    /* Solver */
-
-    // assignments buffer (one entry per source particle / row)
     assignmentsBuffer = bufferManager.createWGPUBuffer<int32_t>(
             wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, NUM_PARTICLES, "assignments");
-    // prices buffer
-    pricesBuffer = bufferManager.createWGPUBuffer<int32_t>(
-            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, NUM_PARTICLES, "prices");
-    // bid value buffer
-    bidValueBuffer = bufferManager.createWGPUBuffer<int32_t>(
-            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, NUM_PARTICLES, "bid value");
-
-    bidFromRowBuffer = bufferManager.createWGPUBuffer<int32_t>(
-            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, NUM_PARTICLES, "bid from row");
-
-    ownerBuffer = bufferManager.createWGPUBuffer<int32_t>(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-                                                          NUM_PARTICLES, "owner");
 
     /* Radix */
     localPrefixSumBuffer = bufferManager.createWGPUBuffer<uint32_t>(
@@ -490,6 +506,16 @@ void CreateRenderPipeline() {
     globalEntries[1].buffer.minBindingSize = sizeof(Params);
 
     auto globalComputeBGL = bufferManager.createBGL(globalEntries, "computeRenderBGL");
+
+    std::array<wgpu::BindGroupLayoutEntry, 3> globalRadixEntries{};
+    globalRadixEntries[0] = globalEntries[0];
+    globalRadixEntries[1] = globalEntries[1];
+    globalRadixEntries[2].binding = 2;
+    globalRadixEntries[2].visibility = wgpu::ShaderStage::Compute;
+    globalRadixEntries[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+    globalRadixEntries[2].buffer.minBindingSize = NUM_PARTICLES * sizeof(vec2<float>);
+    auto globalRadixBGL = bufferManager.createBGL(globalRadixEntries, "globalRadixBGL");
+
     // render shader version
     // not sure if copy necessary but cheap anyway, ugly code
     auto globalRenderEntries = globalEntries;
@@ -500,47 +526,6 @@ void CreateRenderPipeline() {
     globalRenderEntries[0].visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment;
 
     auto globalRenderBGL = bufferManager.createBGL(globalRenderEntries, "globalRenderBGL");
-
-    // Group: Solver BindGroup (assignments, cost, prices, bid value, bid from row)
-    std::array<wgpu::BindGroupLayoutEntry, 6> solverEntries{};
-
-    // assignments
-    solverEntries[0].binding = 0;
-    solverEntries[0].visibility = wgpu::ShaderStage::Compute;
-    solverEntries[0].buffer.type = wgpu::BufferBindingType::Storage;
-    solverEntries[0].buffer.minBindingSize = NUM_PARTICLES * sizeof(int32_t);
-
-    // target particles (live cost lookup)
-    solverEntries[1].binding = 1;
-    solverEntries[1].visibility = wgpu::ShaderStage::Compute;
-    solverEntries[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-    solverEntries[1].buffer.minBindingSize = NUM_PARTICLES * sizeof(TargetParticleCPU);
-
-    // prices
-    solverEntries[2].binding = 2;
-    solverEntries[2].visibility = wgpu::ShaderStage::Compute;
-    solverEntries[2].buffer.type = wgpu::BufferBindingType::Storage;
-    solverEntries[2].buffer.minBindingSize = NUM_PARTICLES * sizeof(int32_t);
-
-    // bid value
-    solverEntries[3].binding = 3;
-    solverEntries[3].visibility = wgpu::ShaderStage::Compute;
-    solverEntries[3].buffer.type = wgpu::BufferBindingType::Storage;
-    solverEntries[3].buffer.minBindingSize = NUM_PARTICLES * sizeof(int32_t);
-
-    // bid from row
-    solverEntries[4].binding = 4;
-    solverEntries[4].visibility = wgpu::ShaderStage::Compute;
-    solverEntries[4].buffer.type = wgpu::BufferBindingType::Storage;
-    solverEntries[4].buffer.minBindingSize = NUM_PARTICLES * sizeof(int32_t);
-
-    // owner buffer
-    solverEntries[5].binding = 5;
-    solverEntries[5].visibility = wgpu::ShaderStage::Compute;
-    solverEntries[5].buffer.type = wgpu::BufferBindingType::Storage;
-    solverEntries[5].buffer.minBindingSize = NUM_PARTICLES * sizeof(int32_t);
-
-    auto solverBGL = bufferManager.createBGL(solverEntries, "solverBGL");
 
     // Group: Physics (Unique PBF buffers)
     // TODO: migrate to getBGLayoutEntries - binding and visibility are repetitive
@@ -605,22 +590,10 @@ void CreateRenderPipeline() {
     auto radixBGL = bufferManager.createBGL(radixEntries, "radixBGL");
 
     /* Pipeline Layouts */
-    // Solver pipeline
-    std::array<wgpu::BindGroupLayout, 2> solverLayouts = {
-            globalComputeBGL,   // group 0
-            solverBGL,          // group 1
-    };
-
-    wgpu::PipelineLayoutDescriptor solverPLDesc{};
-    solverPLDesc.bindGroupLayoutCount = solverLayouts.size();
-    solverPLDesc.bindGroupLayouts = solverLayouts.data();
-
-    auto solverPipelineLayout = device.CreatePipelineLayout(&solverPLDesc);
-
-    // Radix
+    // Radix (group 0 includes posStar for predicted-position spatial hash)
     std::array<wgpu::BindGroupLayout, 2> radixLayouts = {
-            globalComputeBGL,   // group 0
-            radixBGL,           // group 1
+            globalRadixBGL,
+            radixBGL,
     };
     wgpu::PipelineLayoutDescriptor radixPLDesc{};
     radixPLDesc.bindGroupLayoutCount = radixLayouts.size();
@@ -652,7 +625,7 @@ void CreateRenderPipeline() {
     // group 0 - params
     std::array<wgpu::BindGroupEntry, 2> globalBGEntries;
     globalBGEntries[0] = {.binding = 0, .buffer = particleBuffer, .offset = 0};
-    globalBGEntries[1] = {.binding = 1, .buffer = paramsBuffer, .offset = 0, .size = sizeof(params)};
+    globalBGEntries[1] = {.binding = 1, .buffer = paramsBuffer, .offset = 0, .size = sizeof(g_simParams)};
 
     wgpu::BindGroupDescriptor globalComputeBGDesc{};
     globalComputeBGDesc.layout = globalComputeBGL;
@@ -668,40 +641,18 @@ void CreateRenderPipeline() {
 
     globalRenderBG = device.CreateBindGroup(&globalRenderBGDesc);
 
+    wgpu::BindGroupDescriptor globalRadixBGDesc{};
+    globalRadixBGDesc.layout = globalRadixBGL;
+    globalRadixBGDesc.entryCount = 3;
+    const std::array<wgpu::BindGroupEntry, 3> globalRadixBGEntries = {
+            wgpu::BindGroupEntry{.binding = 0, .buffer = particleBuffer, .offset = 0},
+            wgpu::BindGroupEntry{.binding = 1, .buffer = paramsBuffer, .offset = 0, .size = sizeof(g_simParams)},
+            wgpu::BindGroupEntry{.binding = 2, .buffer = posStarBuffer, .offset = 0},
+    };
+    globalRadixBGDesc.entries = globalRadixBGEntries.data();
+    globalRadixBG = device.CreateBindGroup(&globalRadixBGDesc);
+
     puts("params group done!");
-
-    // group 1 - solver
-    assert(assignmentsBuffer);
-    assert(targetParticleBuffer);
-    assert(pricesBuffer);
-    assert(bidValueBuffer);
-    assert(bidFromRowBuffer);
-    assert(solverBGL);
-
-    std::vector<wgpu::BindGroupEntry> solverBGEntries = BufferManager::getBGEntries(
-            {
-                    assignmentsBuffer,
-                    targetParticleBuffer,
-                    pricesBuffer,
-                    bidValueBuffer,
-                    bidFromRowBuffer,
-                    ownerBuffer,
-            });
-
-    assert(solverBGEntries.size() == solverEntries.size());
-
-    wgpu::BindGroupDescriptor solverBGDesc{};
-    solverBGDesc.layout = solverBGL;
-    solverBGDesc.entryCount = solverBGEntries.size();
-    solverBGDesc.entries = solverBGEntries.data();
-
-    cout << solverBGEntries.size() << endl;
-
-    puts("Attempt bind group creation");
-
-    solverBG = device.CreateBindGroup(&solverBGDesc);
-
-    puts("solver group done!");
 
     assert(localPrefixSumBuffer);
     assert(prefixBlockSumBuffer);
@@ -799,23 +750,6 @@ void CreateRenderPipeline() {
         return device.CreateComputePipeline(&pipelineDesc);
     };
 
-    auto buildSolverComputePipeline = [&](const wgpu::StringView &entrypoint, double eps, int32_t useDistance) {
-        wgpu::ConstantEntry solverConstants[] = {
-                {.key = "EPSILON", .value = eps},
-                {.key = "GRID_DIM", .value = static_cast<double>(DIM)},
-                {.key = "CANDIDATE_RADIUS", .value = static_cast<double>(AUCTION_CANDIDATE_RADIUS)},
-                {.key = "USE_DISTANCE", .value = static_cast<double>(useDistance)},
-        };
-        return buildComputePipeline(
-                entrypoint,
-                solverShaderModule,
-                solverPipelineLayout,
-                solverConstants
-        );
-    };
-
-    puts("SOLVER PIPELINE");
-
     auto buildPhysicsComputePipeline = [&](const wgpu::StringView &entrypoint) {
         return buildComputePipeline(
                 entrypoint,
@@ -856,20 +790,6 @@ void CreateRenderPipeline() {
 
     puts("RADIX COMPUTE PIPELINE");
 
-    // solver — converge: RGB+distance fill-only; live: RGB-only per frame after convergence
-    solverBiddingConvergePipeline = buildSolverComputePipeline("auctionBiddingPhase", AUCTION_EPSILON, 1);
-    solverUpdateConvergePipeline = buildSolverComputePipeline("auctionUpdatePhase", AUCTION_EPSILON, 1);
-    solverRepairConvergePipeline = buildSolverComputePipeline("auctionRepairPhase", AUCTION_EPSILON, 1);
-
-    solverBiddingPipeline = buildSolverComputePipeline("auctionBiddingPhase", AUCTION_EPSILON, 0);
-    solverUpdatePipeline = buildSolverComputePipeline("auctionUpdatePhase", AUCTION_EPSILON, 0);
-    solverInitPipeline = buildSolverComputePipeline("auctionInit", AUCTION_EPSILON, 0);
-    solverSyncPipeline = buildSolverComputePipeline("auctionSyncPhase", AUCTION_EPSILON, 0);
-    solverRepairPipeline = buildSolverComputePipeline("auctionRepairPhase", AUCTION_EPSILON, 0);
-
-    g_matchingConverged = false;
-    g_convergeFramesLeft = auctionConvergenceFrames(NUM_PARTICLES);
-
     // radix
     radixSortPipelines = buildRadixComputePipeline("radix_sort", radixSortShaderModule);
     radixReorderPipelines = buildRadixComputePipeline("radix_sort_reorder", radixReorderShaderModule);
@@ -887,6 +807,7 @@ void CreateRenderPipeline() {
     physicsSolverOnePipeline = buildPhysicsComputePipeline("pbfSolverPass");
     physicsSolverTwoPipeline = buildPhysicsComputePipeline("pbfSolverPassTwo");
     physicsSolverThreePipeline = buildPhysicsComputePipeline("pbfSolverPassThree");
+    physicsAssignmentTransportPipeline = buildPhysicsComputePipeline("assignmentTransport");
 
     puts("COMPUTE");
 
@@ -907,25 +828,39 @@ void CreateRenderPipeline() {
     renderPipelineDesc.fragment = &fragmentState;
     renderPipeline = device.CreateRenderPipeline(&renderPipelineDesc);
 
-    // Upload data
     queue.WriteBuffer(
             indexBuffer,
             0,
             indexData.data(),
             indexData.size() * sizeof(uint16_t)
     );
-
-    // solver
     queue.WriteBuffer(
             particleBuffer,
             0,
             particleCPUData.data(),
             particleCPUData.size() * sizeof(ParticleCPU)
     );
+    queue.WriteBuffer(paramsBuffer, 0, &g_simParams, sizeof(g_simParams));
 
-    queue.WriteBuffer(paramsBuffer, 0, &params, sizeof(params));
+    puts("Rendering source image before Hungarian solve...");
+    SubmitRenderPass();
+    surface.Present();
+    instance.ProcessEvents();
 
-    bufferManager.fillVal(assignmentsBuffer, NUM_PARTICLES, -1);
+    puts("CPU Hungarian solve...");
+    const std::vector<int32_t> assignments =
+            computeHungarianAssignments(kSourceImage, kTargetImage, DIM, DIM);
+    puts("CPU Hungarian solve done.");
+
+    auto targetParticleCPUData = loadTargetParticlesFromImage(kTargetImage, DIM, DIM);
+
+    assert(assignments.size() == static_cast<size_t>(NUM_PARTICLES));
+    queue.WriteBuffer(
+            assignmentsBuffer,
+            0,
+            assignments.data(),
+            assignments.size() * sizeof(int32_t)
+    );
 
     queue.WriteBuffer(
             targetParticleBuffer,
@@ -933,10 +868,6 @@ void CreateRenderPipeline() {
             targetParticleCPUData.data(),
             targetParticleCPUData.size() * sizeof(TargetParticleCPU)
     );
-
-    bufferManager.fillZero(pricesBuffer, NUM_PARTICLES);
-    bufferManager.fillVal(bidValueBuffer, NUM_PARTICLES, std::numeric_limits<int32_t>::min());
-    bufferManager.fillVal(bidFromRowBuffer, NUM_PARTICLES, -1);
 
     std::vector<uint32_t> indices(NUM_PARTICLES);
     std::iota(indices.begin(), indices.end(), 0u);
@@ -953,9 +884,6 @@ void CreateRenderPipeline() {
             indices.size() * sizeof(uint32_t)
     );
 
-    bufferManager.fillVal(ownerBuffer, NUM_PARTICLES, -1);
-
-    // not mapping for now since I want to preserve order of binding args to make sure I don't miss anything
     // radix
     bufferManager.fillZero(localPrefixSumBuffer, NUM_PARTICLES);
     bufferManager.fillZero(prefixBlockSumBuffer, 4 * RADIX_WORKGROUP_COUNT);
@@ -970,15 +898,6 @@ void CreateRenderPipeline() {
     bufferManager.fillZero(omegaBuffer, NUM_PARTICLES);
 
     assert(NUM_PARTICLES == static_cast<int32_t>(particleCPUData.size()));
-
-    encoder = device.CreateCommandEncoder();
-    solverComputePass(solverInitPipeline);
-    const int32_t initAuctionIters = auctionInitIterations(NUM_PARTICLES);
-    runAuctionRounds(initAuctionIters, solverBiddingConvergePipeline, solverUpdateConvergePipeline);
-    solverConvergePass(auctionRepairRounds(NUM_PARTICLES), solverRepairConvergePipeline);
-
-    wgpu::CommandBuffer initCommands = encoder.Finish();
-    queue.Submit(1, &initCommands);
 }
 
 void InitGraphics() {
@@ -988,98 +907,45 @@ void InitGraphics() {
 
 // main loop
 void Render() {
-    wgpu::SurfaceTexture surfaceTexture;
-    surface.GetCurrentTexture(&surfaceTexture);
+    g_simParams.frameCount = g_frameCount++;
+    queue.WriteBuffer(paramsBuffer, 0, &g_simParams, sizeof(g_simParams));
 
-    wgpu::RenderPassColorAttachment attachment{
-            .view = surfaceTexture.texture.CreateView(),
-            .loadOp = wgpu::LoadOp::Clear,
-            .storeOp = wgpu::StoreOp::Store
-    };
-
-    wgpu::RenderPassDescriptor renderpass{.colorAttachmentCount = 1,
-            .colorAttachments = &attachment};
-
-    // Compute
     encoder = device.CreateCommandEncoder();
-    // Step 1: Auction — distance+fill until converged, then RGB-only live rounds
-    if (AUCTION_ITERS_PER_FRAME > 0) {
-        const bool convergePhase = !g_matchingConverged;
-        if (convergePhase) {
-            runAuctionRounds(AUCTION_ITERS_PER_FRAME, solverBiddingConvergePipeline,
-                             solverUpdateConvergePipeline);
-            solverConvergePass(auctionRepairRoundsPerFrame(), solverRepairConvergePipeline);
-            if (--g_convergeFramesLeft <= 0) {
-                g_matchingConverged = true;
+    {
+        auto computePass = encoder.BeginComputePass();
+
+        physicsDispatch(computePass, physicsExternalForcesPipeline);
+
+        constexpr float kPbfMorphThreshold = 0.75f;
+        const bool runPbf = morphRampCpu(g_frameCount) >= kPbfMorphThreshold;
+
+        if (runPbf) {
+            const uint32_t pbfIterations = std::max(1u, g_simParams.solverIterations);
+            for (uint32_t pbfIter = 0; pbfIter < pbfIterations; ++pbfIter) {
+                radixSortAndBuildBins(computePass);
+                physicsDispatch(computePass, physicsSolverOnePipeline);
+                physicsDispatch(computePass, physicsSolverTwoPipeline);
             }
-        } else {
-            runAuctionRounds(AUCTION_ITERS_PER_FRAME, solverBiddingPipeline, solverUpdatePipeline);
         }
+
+        physicsDispatch(computePass, physicsAssignmentTransportPipeline);
+
+        if (runPbf) {
+            radixSortAndBuildBins(computePass);
+            physicsDispatch(computePass, physicsSolverThreePipeline);
+        }
+
+        computePass.End();
     }
 
-    // Step 2: PBF External Forces
-    physicsComputePass(physicsExternalForcesPipeline);
-
-    // Step 3: radix sort (interleaved sort -> scan -> reorder per bit pass)
-    bool pingPong = false;
-    for (int32_t i = 0; i < RADIX_PASS_COUNT; i++) {
-        wgpu::BindGroup radixBindGroup = pingPong ? radixBGAlt : radixBG;
-
-        auto sortPass = encoder.BeginComputePass();
-        sortPass.SetPipeline(radixSortPipelines[i]);
-        sortPass.SetBindGroup(0, globalComputeBG);
-        sortPass.SetBindGroup(1, radixBindGroup);
-        sortPass.DispatchWorkgroups(RADIX_WORKGROUP_COUNT);
-        sortPass.End();
-
-        auto scanPass = encoder.BeginComputePass();
-        scanPass.SetPipeline(radixScanPipeline);
-        scanPass.SetBindGroup(0, globalComputeBG);
-        scanPass.SetBindGroup(1, radixBindGroup);
-        scanPass.DispatchWorkgroups(1);
-        scanPass.End();
-
-        auto reorderPass = encoder.BeginComputePass();
-        reorderPass.SetPipeline(radixReorderPipelines[i]);
-        reorderPass.SetBindGroup(0, globalComputeBG);
-        reorderPass.SetBindGroup(1, radixBindGroup);
-        reorderPass.DispatchWorkgroups(RADIX_WORKGROUP_COUNT);
-        reorderPass.End();
-
-        pingPong = !pingPong;
-    }
-
-    physicsComputePass(physicsClearBinsPipeline);
-    physicsComputePass(physicsBuildBinsPipeline);
-
-    // Step 4: Continue rest of PBF
-    physicsComputePass(physicsSolverOnePipeline);
-    physicsComputePass(physicsSolverTwoPipeline);
-    physicsComputePass(physicsSolverThreePipeline);
-
-    // Step 5: Render
-    // Vertex + Fragment shader must use render pass
-    wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderpass);
-    pass.SetPipeline(renderPipeline);
-    // apply index buffer & bind group
-    pass.SetIndexBuffer(indexBuffer, wgpu::IndexFormat::Uint16);
-    pass.SetBindGroup(0, globalRenderBG);
-
-    pass.DrawIndexed(
-            6,
-            static_cast<uint32_t>(NUM_PARTICLES),
-            0,
-            0,
-            0
-    );
-    pass.End();
+    EncodeRenderPass(encoder);
     wgpu::CommandBuffer commands = encoder.Finish();
 
     // submit to command queue
     queue.Submit(1, &commands);
 }
 
-void Simulate(uint16_t dim = 32) {
+void Simulate(uint16_t dim = 48) {
     // main - so can expose args to emscripten
     setDim(dim);
     Init();

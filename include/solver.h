@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <random>
 #include <type_traits>
+#include <cstdint>
+#include <vector>
 
 // consider templated factory refactor if we want more than one potential solver
 
@@ -104,28 +106,49 @@ public:
     }
 
     void iterateSolver() override {
-        // for each iteration, find the best bipartite matching for src w/ index iter
         if (iter_ >= srcLen_) {
             exert_impulse();
             return;
         }
 
+        augmentOneRow();
+        exert_impulse2();
+    }
+
+    // Run all N augment rounds to completion (CPU-only assignment solve).
+    void solveComplete() {
+        while (iter_ < srcLen_) {
+            augmentOneRow();
+        }
+    }
+
+    // GPU layout: assignments[source_index] = target_index.
+    [[nodiscard]] std::vector<int32_t> getSourceToTargetAssignments() const {
+        std::vector<int32_t> assignments(srcLen_, -1);
+        for (int target = 0; target < tarLen_; ++target) {
+            const int src = job_[target];
+            if (src >= 0 && src < srcLen_) {
+                assignments[src] = target;
+            }
+        }
+        return assignments;
+    }
+
+private:
+    void augmentOneRow() {
         int tarCur = tarLen_;
-        int srcCur = iter_++;
+        const int srcCur = iter_++;
         job_[tarCur] = srcCur;
-        // min reduced cost over edges from Z to src srcCur
         std::fill(minTo_.begin(), minTo_.end(), INF);
         std::fill(prev_.begin(), prev_.end(), -1);
         std::fill(inZ_.begin(), inZ_.end(), false);
 
-        // likely bulk of work
         while (job_[tarCur] != -1) {
             inZ_[tarCur] = true;
             const int src = job_[tarCur];
             T delta = INF;
-            int tarNext;
+            int tarNext = 0;
             for (int tar = 0; tar < tarLen_; tar++) {
-                // thread pool each iteration as promises - iterations are independent
                 if (!inZ_[tar]) {
                     if (ckmin(minTo_[tar], cost_matrix_[src][tar] - ys_[src] - yt_[tar]))
                         prev_[tar] = tarCur;
@@ -134,7 +157,6 @@ public:
                 }
             }
 
-            // thread pool each iteration as promises - iterations independent
             for (int tar = 0; tar <= tarLen_; tar++) {
                 if (inZ_[tar]) {
                     ys_[job_[tar]] += delta;
@@ -146,16 +168,11 @@ public:
             tarCur = tarNext;
         }
 
-        // update assignments along alternating path
         for (int tar; tarCur != tarLen_; tarCur = tar) {
             job_[tarCur] = job_[tar = prev_[tarCur]];
         }
         answers_.push_back(-yt_[tarLen_]);
-
-        exert_impulse2();
     }
-
-private:
     void compute_cost_matrix() {
         auto cost_function = get_cost_function<COST_T>();
         len_ = src_buf_.length();
@@ -221,6 +238,17 @@ private:
     std::vector<bool> inZ_;
     const T INF = std::numeric_limits<T>::max();
 };
+
+template<typename T = float, COST_TYPE COST_T = COST_TYPE::RGB_DIST_HYBRID>
+[[nodiscard]] inline std::vector<int32_t> computeHungarianAssignments(
+        const std::string &start_path,
+        const std::string &target_path,
+        int pWidth,
+        int pHeight) {
+    Hungarian<T, COST_T> solver(start_path, target_path, pWidth, pHeight);
+    solver.solveComplete();
+    return solver.getSourceToTargetAssignments();
+}
 
 // Async hungarian: https://web.mit.edu/dimitrib/www/Bertsekas_Castanon_Parallel_Hungarian_1993.pdf
 

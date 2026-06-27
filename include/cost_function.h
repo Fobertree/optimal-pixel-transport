@@ -138,7 +138,7 @@ std::vector<T> get_cost_buffer(ParticleBuffer &src_buf, ParticleBuffer &target_b
         for (int j = 0; j < n; j++) {
             auto p1 = src_buf.getParticle(i);
             auto p2 = target_buf.getParticle(j);
-            // magic bit shift bc auction epsilon complementary slackness not satisfied by epsilon = 1/n (must be less)
+            // scale costs for integer solver stability
             out.push_back(cost(*p1, *p2) * (multiplier << 1));
         }
     }

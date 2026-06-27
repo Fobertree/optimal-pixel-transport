@@ -18,6 +18,7 @@ add_executable(${PROJECT_NAME}
         src/main.cpp
         src/particle.cpp
         src/particle_buffer.cpp
+        src/image_stb.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
